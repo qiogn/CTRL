@@ -84,6 +84,7 @@ static StepperCtrl_Status_t update_motor_state(Motor_Control_t* motor, Stepper_A
 static StepperCtrl_Status_t set_motor_speed(Stepper_Axis_t axis, uint32_t speed_hz);
 static StepperCtrl_Status_t set_motor_direction(Stepper_Axis_t axis, uint8_t direction);
 static void handle_controller_error(const char* error_msg);
+static void delay_us(uint32_t us);
 static uint32_t calculate_acceleration_time(uint32_t start_speed, uint32_t end_speed, uint32_t acceleration);
 static uint32_t calculate_acceleration_distance(uint32_t start_speed, uint32_t end_speed, uint32_t acceleration);
 
@@ -101,6 +102,7 @@ StepperCtrl_Status_t StepperCtrl_Init(void)
         handle_controller_error("Timer initialization failed");
         return STEPPER_CTRL_ERROR;
     }
+
 
     /* Reset motor states */
     memset(&g_stepper_ctrl.motor1, 0, sizeof(Motor_Control_t));
@@ -986,11 +988,71 @@ static StepperCtrl_Status_t set_motor_speed(Stepper_Axis_t axis, uint32_t speed_
   */
 static StepperCtrl_Status_t set_motor_direction(Stepper_Axis_t axis, uint8_t direction)
 {
-    /* This function needs to be implemented based on your hardware */
-    /* For now, it's a placeholder */
+    GPIO_PinState dir_pin_state;
+    GPIO_TypeDef* dir_port = NULL;
+    uint16_t dir_pin = 0;
+    Motor_Control_t* motor = NULL;
 
-    (void)axis;
-    (void)direction;
+    /* Validate direction parameter */
+    if (direction > 1)
+    {
+        handle_controller_error("Invalid direction parameter");
+        return STEPPER_CTRL_INVALID_PARAM;
+    }
+
+    /* Get motor control structure based on axis */
+    switch (axis)
+    {
+        case STEPPER_AXIS_1:
+            motor = &g_stepper_ctrl.motor1;
+            dir_port = MOTOR1_DIR_PORT;
+            dir_pin = MOTOR1_DIR_PIN;
+            break;
+
+        case STEPPER_AXIS_2:
+            motor = &g_stepper_ctrl.motor2;
+            dir_port = MOTOR2_DIR_PORT;
+            dir_pin = MOTOR2_DIR_PIN;
+            break;
+
+        default:
+            handle_controller_error("Invalid axis parameter");
+            return STEPPER_CTRL_INVALID_PARAM;
+    }
+
+    /* Check if direction port is valid */
+    if (dir_port == NULL)
+    {
+        handle_controller_error("Direction port not defined");
+        return STEPPER_CTRL_ERROR;
+    }
+
+    /* Check if direction pin is valid */
+    if (dir_pin == 0)
+    {
+        handle_controller_error("Direction pin not defined");
+        return STEPPER_CTRL_ERROR;
+    }
+
+    /* Check if direction is already set to the desired value */
+    if (motor->direction == direction)
+    {
+        /* Direction already set, no need to change */
+        return STEPPER_CTRL_OK;
+    }
+
+    /* Convert direction to GPIO pin state */
+    dir_pin_state = (direction == 0) ? DIRECTION_FORWARD : DIRECTION_REVERSE;
+
+    /* Set direction pin */
+    HAL_GPIO_WritePin(dir_port, dir_pin, dir_pin_state);
+
+    /* Update direction cache */
+    motor->direction = direction;
+
+    /* Wait for direction signal settling time */
+    /* DIR_SETTLING_TIME_US is defined in stepper_config.h (1300us) */
+    delay_us(DIR_SETTLING_TIME_US);
 
     return STEPPER_CTRL_OK;
 }
@@ -1013,6 +1075,28 @@ static void handle_controller_error(const char* error_msg)
   * @param  acceleration: Acceleration in Hz/s
   * @retval Time in seconds
   */
+/**
+  * @brief  Microsecond delay function
+  * @param  us: Delay in microseconds
+  * @retval None
+  */
+static void delay_us(uint32_t us)
+{
+    /* Simple busy loop delay */
+    /* This provides reasonable accuracy for direction settling time */
+    /* Assuming SystemCoreClock is 72MHz for STM32F103C8T6 */
+
+    /* Calculate number of loops needed */
+    /* Each loop takes approximately 4-6 cycles depending on optimization */
+    /* Using 6 cycles per loop for conservative timing */
+    volatile uint32_t loop_count = (SystemCoreClock / 6000000) * us;
+
+    while (loop_count--)
+    {
+        __NOP(); /* No operation to ensure loop isn't optimized away */
+    }
+}
+
 static uint32_t calculate_acceleration_time(uint32_t start_speed, uint32_t end_speed, uint32_t acceleration)
 {
     if (acceleration == 0)

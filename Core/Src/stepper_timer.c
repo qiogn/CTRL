@@ -48,6 +48,7 @@ static StepperTimer_Status_t configure_timer_base(void);
 static StepperTimer_Status_t configure_pwm_channel(uint32_t channel);
 static uint32_t calculate_arr_value(uint32_t frequency_hz);
 static StepperTimer_Status_t validate_frequency(uint32_t frequency_hz);
+static void calculate_frequency_limits(uint32_t* min_achievable_hz, uint32_t* max_achievable_hz);
 static void handle_timer_error(const char* error_msg);
 
 /* Exported functions --------------------------------------------------------*/
@@ -584,14 +585,57 @@ static StepperTimer_Status_t configure_pwm_channel(uint32_t channel)
   */
 static uint32_t calculate_arr_value(uint32_t frequency_hz)
 {
-    /* Timer clock after prescaler = 1MHz (72MHz / (71+1)) */
-    /* ARR = (Timer clock / frequency) - 1 */
-    uint32_t timer_clock_hz = TIMER_CLOCK_FREQ_HZ / (TIMER_PRESCALER + 1);
-    uint32_t arr_value = (timer_clock_hz / frequency_hz) - 1;
+    /* STM32F1 timer clock behavior:
+     * - When APB1 prescaler = 1: Timer clock = APB1 clock
+     * - When APB1 prescaler != 1: Timer clock = APB1 clock × 2
+     *
+     * System configuration:
+     * - System clock: 72MHz
+     * - APB1 prescaler: DIV2 (36MHz)
+     * - Timer clock: 72MHz (APB1 clock × 2)
+     * - Timer prescaler: 71
+     * - Timer counter clock: 72MHz / (71+1) = 1MHz
+     *
+     * ARR = (Timer counter clock / frequency) - 1
+     */
 
-    /* Ensure minimum ARR value */
-    if (arr_value < 1)
+    /* Validate input parameter */
+    if (frequency_hz == 0)
     {
+        /* Frequency cannot be zero, return minimum ARR value */
+        return 1;
+    }
+
+    /* Calculate timer counter clock after prescaler */
+    uint32_t timer_counter_clock_hz = TIMER_CLOCK_FREQ_HZ / (TIMER_PRESCALER + 1);
+
+    /* Verify timer counter clock calculation */
+    /* Expected: 72MHz / (71+1) = 72MHz / 72 = 1MHz */
+    if (timer_counter_clock_hz != 1000000U)
+    {
+        /* This indicates configuration error in TIMER_CLOCK_FREQ_HZ or TIMER_PRESCALER */
+        handle_timer_error("Timer counter clock calculation error");
+        return 1;
+    }
+
+    /* Check for division by zero and overflow */
+    if (frequency_hz > timer_counter_clock_hz)
+    {
+        /* Frequency too high, return minimum ARR value */
+        return 1;
+    }
+
+    /* Calculate ARR value */
+    uint32_t arr_value = (timer_counter_clock_hz / frequency_hz);
+
+    /* ARR = (clock / frequency) - 1, but ensure ARR >= 1 */
+    if (arr_value > 1)
+    {
+        arr_value -= 1;
+    }
+    else
+    {
+        /* Minimum ARR value is 1 */
         arr_value = 1;
     }
 
@@ -605,14 +649,46 @@ static uint32_t calculate_arr_value(uint32_t frequency_hz)
 }
 
 /**
+  * @brief  Calculate achievable frequency limits based on timer hardware
+  * @param  min_achievable_hz: Pointer to store minimum achievable frequency
+  * @param  max_achievable_hz: Pointer to store maximum achievable frequency
+  * @retval None
+  */
+static void calculate_frequency_limits(uint32_t* min_achievable_hz, uint32_t* max_achievable_hz)
+{
+    /* Calculate timer counter clock after prescaler */
+    uint32_t timer_counter_clock_hz = TIMER_CLOCK_FREQ_HZ / (TIMER_PRESCALER + 1);
+
+    /* Maximum frequency: ARR = 1 (minimum period) */
+    /* Frequency = timer_counter_clock_hz / (ARR + 1) */
+    *max_achievable_hz = timer_counter_clock_hz / 2;  /* ARR = 1 */
+
+    /* Minimum frequency: ARR = 0xFFFF (maximum period) */
+    /* Frequency = timer_counter_clock_hz / (ARR + 1) */
+    *min_achievable_hz = timer_counter_clock_hz / (0xFFFF + 1);
+}
+
+/**
   * @brief  Validate frequency parameter
   * @param  frequency_hz: Frequency to validate
   * @retval StepperTimer_Status_t Status code
   */
 static StepperTimer_Status_t validate_frequency(uint32_t frequency_hz)
 {
+    uint32_t min_achievable_hz, max_achievable_hz;
+
+    /* Calculate hardware limits */
+    calculate_frequency_limits(&min_achievable_hz, &max_achievable_hz);
+
+    /* Check against configuration limits */
     if (frequency_hz < g_stepper_timer.config.min_pulse_frequency_hz ||
         frequency_hz > g_stepper_timer.config.max_pulse_frequency_hz)
+    {
+        return STEPPER_TIMER_INVALID_PARAM;
+    }
+
+    /* Check against hardware limits */
+    if (frequency_hz < min_achievable_hz || frequency_hz > max_achievable_hz)
     {
         return STEPPER_TIMER_INVALID_PARAM;
     }

@@ -245,10 +245,10 @@ void peripheral_motor_set_speed(Motor_Axis_t axis, uint32_t speed_hz)
     Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
 
     /* Limit speed to valid range */
-    if (speed_hz < STEPPER_MIN_FREQUENCY_HZ) {
-        speed_hz = STEPPER_MIN_FREQUENCY_HZ;
-    } else if (speed_hz > STEPPER_MAX_FREQUENCY_HZ) {
-        speed_hz = STEPPER_MAX_FREQUENCY_HZ;
+    if (speed_hz < MIN_SPEED_HZ) {
+        speed_hz = MIN_SPEED_HZ;
+    } else if (speed_hz > MAX_SPEED_HZ) {
+        speed_hz = MAX_SPEED_HZ;
     }
 
     StepperCtrl_SetSpeed(stepper_axis, speed_hz);

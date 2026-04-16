@@ -50,12 +50,26 @@ extern "C" {
 #define STEPPER_TIMER_IRQn          TIM3_IRQn
 
 /* Timer clock configuration */
-#define TIMER_CLOCK_FREQ_HZ         72000000U  /* APB1 timer clock = 72MHz */
+/*
+ * STM32F1 timer clock behavior:
+ * - System clock: 72MHz
+ * - APB1 prescaler: DIV2 (36MHz)
+ * - When APB1 prescaler != 1: Timer clock = APB1 clock × 2 = 72MHz
+ * - Timer prescaler: 71
+ * - Timer counter clock: 72MHz / (71+1) = 1MHz
+ */
+#define TIMER_CLOCK_FREQ_HZ         72000000U  /* APB1 timer clock = 72MHz (APB1×2) */
 #define TIMER_PRESCALER             71U        /* 72MHz / (71+1) = 1MHz timer clock */
 
 /* PWM channel assignments */
-#define MOTOR1_PWM_CHANNEL          TIM_CHANNEL_1
-#define MOTOR2_PWM_CHANNEL          TIM_CHANNEL_2
+/* Note: TIM_CHANNEL_x are defined in stm32f1xx_hal_tim.h */
+/* Using numeric values for compatibility */
+#define MOTOR1_PWM_CHANNEL          0x00000000U  /* TIM_CHANNEL_1 */
+#define MOTOR2_PWM_CHANNEL          0x00000004U  /* TIM_CHANNEL_2 */
+
+/* Timer channel aliases for stepper_timer.c */
+#define STEPPER_TIMER_CHANNEL_1     MOTOR1_PWM_CHANNEL
+#define STEPPER_TIMER_CHANNEL_2     MOTOR2_PWM_CHANNEL
 
 /* Performance limits --------------------------------------------------------*/
 

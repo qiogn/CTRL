@@ -108,8 +108,7 @@ typedef struct {
 /* Default configuration values */
 #define DEFAULT_MAX_SPEED_HZ         DEFAULT_SPEED_HZ          /* Default maximum speed */
 #define DEFAULT_START_SPEED_HZ       MIN_SPEED_HZ              /* Starting speed */
-#define DEFAULT_ACCELERATION_HZ_S    DEFAULT_ACCELERATION_HZ_S /* Default acceleration */
-#define DEFAULT_DECELERATION_HZ_S    DEFAULT_DECELERATION_HZ_S /* Default deceleration */
+/* Note: DEFAULT_ACCELERATION_HZ_S and DEFAULT_DECELERATION_HZ_S are defined in stepper_config.h */
 
 /* Timing constants */
 #define SPEED_UPDATE_INTERVAL_MS     10U                       /* Update speed every 10ms */
