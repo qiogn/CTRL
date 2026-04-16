@@ -11,6 +11,7 @@
 #include "usart.h"
 #include "gpio.h"
 #include "dual_stepper.h"
+#include "peripheral_lib.h"
 
 /* USER CODE BEGIN PTD */
 typedef enum
