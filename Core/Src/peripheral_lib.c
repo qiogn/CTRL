@@ -8,9 +8,7 @@
 #include "peripheral_lib.h"
 #include "gpio.h"
 #include "usart.h"
-#include "stepper_timer.h"
-#include "stepper_controller.h"
-#include "stepper_config.h"
+#include "dual_stepper.h"
 
 /* Stepper motor control levels - same as dual_stepper.c */
 #define STEPPER_ENABLE_LEVEL GPIO_PIN_RESET
@@ -19,8 +17,12 @@
 /* Private variables ---------------------------------------------------------*/
 static UART_HandleTypeDef* g_uart_handle = NULL;
 
+/* Motor speed storage for software delay version */
+static uint32_t g_motor_speed_hz[MOTOR_AXIS_2 + 1] = {1000, 1000}; /* Default 1kHz */
+
 /* Private function prototypes -----------------------------------------------*/
 static void configure_gpio_for_function(uint16_t pin, GPIO_TypeDef* port, GPIO_Function_t function);
+static uint16_t speed_hz_to_pulse_width_us(uint32_t speed_hz);
 
 /* Exported functions --------------------------------------------------------*/
 
@@ -148,55 +150,44 @@ UART_HandleTypeDef* peripheral_get_uart_handle(UART_Port_t uart_port)
 }
 
 /**
-  * @brief  Initialize stepper motor
+  * @brief  Initialize stepper motor (software delay version)
   * @param  axis: Motor axis identifier
   * @retval None
   */
 void peripheral_motor_init(Motor_Axis_t axis)
 {
-    /* Initialize stepper controller */
-    StepperCtrl_Init();
-
-    /* Configure default profile */
-    MotionProfile_Config_t profile_config = {
-        .max_speed_hz = DEFAULT_SPEED_HZ,
-        .start_speed_hz = MIN_SPEED_HZ,
-        .acceleration_hz_s = DEFAULT_ACCELERATION_HZ_S,
-        .deceleration_hz_s = DEFAULT_DECELERATION_HZ_S,
-        .profile_type = PROFILE_TRAPEZOIDAL
-    };
-
-    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
-    StepperCtrl_ConfigureProfile(stepper_axis, &profile_config);
+    /* Initialize dual stepper driver (only once for both axes) */
+    static uint8_t initialized = 0;
+    if (!initialized) {
+        DualStepper_Init();
+        initialized = 1;
+    }
 
     /* Disable motor initially */
     peripheral_motor_enable(axis, 0);
 }
 
 /**
-  * @brief  Move stepper motor by specified number of steps (legacy API)
+  * @brief  Move stepper motor by specified number of steps (software delay version)
   * @param  axis: Motor axis identifier
   * @param  steps: Number of steps (positive for forward, negative for reverse)
-  * @param  pulse_width_us: Pulse width in microseconds (ignored, using timer control)
+  * @param  pulse_width_us: Pulse width in microseconds
   * @retval None
   */
 void peripheral_motor_move(Motor_Axis_t axis, int16_t steps, uint16_t pulse_width_us)
 {
-    /* Convert to new API - use default frequency based on pulse width */
-    uint32_t frequency_hz = 1000000U / pulse_width_us;  /* Convert us to Hz */
-
-    /* Limit frequency to valid range */
-    if (frequency_hz < MIN_SPEED_HZ) {
-        frequency_hz = MIN_SPEED_HZ;
-    } else if (frequency_hz > MAX_SPEED_HZ) {
-        frequency_hz = MAX_SPEED_HZ;
+    /* Simple wrapper for DualStepper_MoveAxes */
+    if (axis == MOTOR_AXIS_1) {
+        /* Move motor 1 only, motor 2 = 0 steps */
+        DualStepper_MoveAxes(steps, 0, pulse_width_us);
+    } else if (axis == MOTOR_AXIS_2) {
+        /* Move motor 2 only, motor 1 = 0 steps */
+        DualStepper_MoveAxes(0, steps, pulse_width_us);
     }
-
-    peripheral_motor_move_smooth(axis, (int32_t)steps, frequency_hz);
 }
 
 /**
-  * @brief  Move stepper motor with smooth acceleration (new API)
+  * @brief  Move stepper motor with smooth acceleration (software delay version)
   * @param  axis: Motor axis identifier
   * @param  steps: Number of steps (positive for forward, negative for reverse)
   * @param  speed_hz: Speed in Hz
@@ -204,16 +195,16 @@ void peripheral_motor_move(Motor_Axis_t axis, int16_t steps, uint16_t pulse_widt
   */
 void peripheral_motor_move_smooth(Motor_Axis_t axis, int32_t steps, uint32_t speed_hz)
 {
-    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+    /* Store speed for future reference */
+    if (axis <= MOTOR_AXIS_2) {
+        g_motor_speed_hz[axis] = speed_hz;
+    }
 
-    /* Set speed */
-    StepperCtrl_SetSpeed(stepper_axis, speed_hz);
+    /* Convert speed to pulse width */
+    uint16_t pulse_width_us = speed_hz_to_pulse_width_us(speed_hz);
 
-    /* Enable motor */
-    peripheral_motor_enable(axis, 1);
-
-    /* Move relative steps */
-    StepperCtrl_MoveRelative(stepper_axis, steps);
+    /* Call the legacy move function with calculated pulse width */
+    peripheral_motor_move(axis, (int16_t)steps, pulse_width_us);
 }
 
 /**
@@ -235,58 +226,55 @@ void peripheral_motor_enable(Motor_Axis_t axis, uint8_t enable)
 }
 
 /**
-  * @brief  Set motor speed
+  * @brief  Set motor speed (software delay version)
   * @param  axis: Motor axis identifier
   * @param  speed_hz: Speed in Hz
   * @retval None
   */
 void peripheral_motor_set_speed(Motor_Axis_t axis, uint32_t speed_hz)
 {
-    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
-
-    /* Limit speed to valid range */
-    if (speed_hz < MIN_SPEED_HZ) {
-        speed_hz = MIN_SPEED_HZ;
-    } else if (speed_hz > MAX_SPEED_HZ) {
-        speed_hz = MAX_SPEED_HZ;
+    /* Store speed for future moves */
+    if (axis <= MOTOR_AXIS_2) {
+        /* Basic validation */
+        if (speed_hz < 10) speed_hz = 10;        /* Minimum 10Hz */
+        if (speed_hz > 5000) speed_hz = 5000;    /* Maximum 5kHz for software delay */
+        g_motor_speed_hz[axis] = speed_hz;
     }
-
-    StepperCtrl_SetSpeed(stepper_axis, speed_hz);
 }
 
 /**
-  * @brief  Get motor speed
+  * @brief  Get motor speed (software delay version)
   * @param  axis: Motor axis identifier
   * @retval Current speed in Hz
   */
 uint32_t peripheral_motor_get_speed(Motor_Axis_t axis)
 {
-    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
-    uint32_t speed_hz = 0;
-
-    StepperCtrl_GetSpeed(stepper_axis, &speed_hz);
-
-    return speed_hz;
+    if (axis <= MOTOR_AXIS_2) {
+        return g_motor_speed_hz[axis];
+    }
+    return 1000; /* Default 1kHz if axis invalid */
 }
 
 /**
-  * @brief  Stop motor movement
+  * @brief  Stop motor movement (software delay version - placeholder)
   * @param  axis: Motor axis identifier
   * @retval None
   */
 void peripheral_motor_stop(Motor_Axis_t axis)
 {
-    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
-    StepperCtrl_Stop(stepper_axis);
+    /* Note: Software delay version uses blocking move functions,
+       so stop functionality is limited. This is a placeholder. */
+    (void)axis; /* Unused parameter */
 }
 
 /**
-  * @brief  Stop all motors
+  * @brief  Stop all motors (software delay version - placeholder)
   * @retval None
   */
 void peripheral_motor_stop_all(void)
 {
-    StepperCtrl_StopAll();
+    /* Note: Software delay version uses blocking move functions,
+       so stop functionality is limited. This is a placeholder. */
 }
 
 /**
@@ -424,4 +412,31 @@ static void configure_gpio_for_function(uint16_t pin, GPIO_TypeDef* port, GPIO_F
             HAL_GPIO_Init(port, &GPIO_InitStruct);
             break;
     }
+}
+
+/**
+  * @brief  Convert speed in Hz to pulse width in microseconds
+  * @param  speed_hz: Speed in Hz
+  * @retval Pulse width in microseconds (clamped to 20-10000us)
+  */
+static uint16_t speed_hz_to_pulse_width_us(uint32_t speed_hz)
+{
+    uint32_t pulse_width_us;
+
+    /* Prevent division by zero */
+    if (speed_hz == 0) {
+        speed_hz = 1;
+    }
+
+    /* Calculate pulse width: 1,000,000 / speed_hz */
+    pulse_width_us = 1000000U / speed_hz;
+
+    /* Limit pulse width range for software delay */
+    if (pulse_width_us < 20U) {
+        pulse_width_us = 20U;      /* Minimum 20us (50kHz) */
+    } else if (pulse_width_us > 10000U) {
+        pulse_width_us = 10000U;   /* Maximum 10ms (100Hz) */
+    }
+
+    return (uint16_t)pulse_width_us;
 }

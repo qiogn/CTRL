@@ -12,9 +12,39 @@
 #define MOTOR2_SWAP_STEP_DIR 0U
 
 #define DEFAULT_PULSE_WIDTH_US 950U
+#define MIN_PULSE_WIDTH_US 20U
+#define MAX_PULSE_WIDTH_US 10000U
 #define MOTOR_DIR_SETTLE_US 1300U
 
 static volatile uint8_t g_dual_stepper_hold_enabled = 0U;
+
+static void DualStepper_ConfigOutput(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState initial_level)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    HAL_GPIO_WritePin(port, pin, initial_level);
+
+    GPIO_InitStruct.Pin = pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(port, &GPIO_InitStruct);
+}
+
+static uint16_t DualStepper_ClampPulseWidth(uint16_t pulse_width_us)
+{
+    if (pulse_width_us < MIN_PULSE_WIDTH_US)
+    {
+        return MIN_PULSE_WIDTH_US;
+    }
+
+    if (pulse_width_us > MAX_PULSE_WIDTH_US)
+    {
+        return MAX_PULSE_WIDTH_US;
+    }
+
+    return pulse_width_us;
+}
 
 /* 简化的延时函数，使用循环计数 */
 static void DualStepper_DelayUs(uint16_t microseconds)
@@ -84,9 +114,25 @@ static void DualStepper_ResolvePins(GPIO_TypeDef *step_port,
 void DualStepper_Init(void)
 {
     /* 禁用定时器中断，我们不使用复杂的中断逻辑 */
+    /* 配置TIM2中断优先级（如果启用） */
+    /* 设置优先级为7，低于TIM3(6)和UART2(0)，确保不会干扰关键中断 */
+    HAL_NVIC_SetPriority(TIM2_IRQn, 7, 0);
+    /* 注意：这里不启用TIM2中断，因为我们的实现不使用定时器中断 */
+    /* 如果其他地方启用了TIM2中断，至少优先级已正确配置 */
+
     /* 只需设置GPIO初始状态 */
 
     /* 禁用两个电机 */
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    DualStepper_ConfigOutput(EN1_GPIO_Port, EN1_Pin, STEPPER_DISABLE_LEVEL);
+    DualStepper_ConfigOutput(Step1_GPIO_Port, Step1_Pin, GPIO_PIN_RESET);
+    DualStepper_ConfigOutput(Dir1_GPIO_Port, Dir1_Pin, GPIO_PIN_RESET);
+    DualStepper_ConfigOutput(EN2_GPIO_Port, EN2_Pin, STEPPER_DISABLE_LEVEL);
+    DualStepper_ConfigOutput(Step2_GPIO_Port, Step2_Pin, GPIO_PIN_RESET);
+    DualStepper_ConfigOutput(Dir2_GPIO_Port, Dir2_Pin, GPIO_PIN_RESET);
+
     DualStepper_SetMotorEnable(EN1_GPIO_Port, EN1_Pin, 0U);
     DualStepper_SetMotorEnable(EN2_GPIO_Port, EN2_Pin, 0U);
 
@@ -144,7 +190,12 @@ void DualStepper_MoveAxes(int16_t motor1_steps, int16_t motor2_steps, uint16_t p
     uint16_t motor1_dir_pin = 0U;
     uint16_t motor2_step_pin = 0U;
     uint16_t motor2_dir_pin = 0U;
-    uint16_t half_pulse = (pulse_width_us > 1U) ? (uint16_t)(pulse_width_us / 2U) : 1U;
+    pulse_width_us = DualStepper_ClampPulseWidth(pulse_width_us);
+    uint16_t half_pulse = (uint16_t)(pulse_width_us / 2U);
+    if (half_pulse == 0U)
+    {
+        half_pulse = 1U;
+    }
 
     motor1_dir = DualStepper_DirectionLevel((motor1_steps >= 0) ? 1U : 0U, MOTOR1_DIR_INVERT);
     motor2_dir = DualStepper_DirectionLevel((motor2_steps >= 0) ? 1U : 0U, MOTOR2_DIR_INVERT);

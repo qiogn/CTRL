@@ -13,8 +13,7 @@
 /* Private defines -----------------------------------------------------------*/
 
 /* Timer clock configuration */
-#define TIMER_CLOCK_FREQ_HZ     TIMER_CLOCK_FREQ_HZ  /* From config */
-#define TIMER_PRESCALER         TIMER_PRESCALER      /* From config */
+/* These are defined in stepper_config.h */
 #define TIMER_COUNTER_MODE      TIM_COUNTERMODE_UP
 
 /* PWM mode configuration */
@@ -46,6 +45,7 @@ static volatile uint32_t g_error_count = 0;
 /* Private function prototypes -----------------------------------------------*/
 static StepperTimer_Status_t configure_timer_base(void);
 static StepperTimer_Status_t configure_pwm_channel(uint32_t channel);
+static StepperTimer_Status_t configure_pwm_gpio(void);
 static uint32_t calculate_arr_value(uint32_t frequency_hz);
 static StepperTimer_Status_t validate_frequency(uint32_t frequency_hz);
 static void calculate_frequency_limits(uint32_t* min_achievable_hz, uint32_t* max_achievable_hz);
@@ -69,6 +69,18 @@ StepperTimer_Status_t StepperTimer_Init(void)
 
     /* Enable timer clock */
     STEPPER_TIMER_CLK_ENABLE();
+
+    /* Configure TIM3 interrupt priority (lower than UART2) */
+    /* UART2 has priority 0, TIM3 gets priority 6 to ensure UART reception is not interrupted */
+    HAL_NVIC_SetPriority(TIM3_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+
+    /* Configure GPIO pins for PWM alternate function */
+    if (configure_pwm_gpio() != STEPPER_TIMER_OK)
+    {
+        handle_timer_error("PWM GPIO configuration failed");
+        return STEPPER_TIMER_ERROR;
+    }
 
     /* Configure timer handle */
     g_htim3.Instance = STEPPER_TIMER_INSTANCE;
@@ -133,6 +145,9 @@ StepperTimer_Status_t StepperTimer_DeInit(void)
         handle_timer_error("Timer deinitialization failed");
         return STEPPER_TIMER_ERROR;
     }
+
+    /* Disable TIM3 interrupt */
+    HAL_NVIC_DisableIRQ(TIM3_IRQn);
 
     /* Reset handle and status */
     memset(&g_stepper_timer, 0, sizeof(g_stepper_timer));
@@ -705,4 +720,33 @@ static void handle_timer_error(const char* error_msg)
 {
     (void)error_msg;  /* In production, could log error */
     g_error_count++;
+}
+
+/**
+  * @brief  Configure GPIO pins for PWM output (alternate function)
+  * @retval StepperTimer_Status_t Status code
+  */
+static StepperTimer_Status_t configure_pwm_gpio(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    /* Enable GPIO clocks */
+    __HAL_RCC_GPIOB_CLK_ENABLE();  /* For PB1 (TIM3_CH4) */
+    __HAL_RCC_GPIOA_CLK_ENABLE();  /* For PA6 (TIM3_CH1) */
+
+    /* Configure PB1 (TIM3_CH4) as alternate function push-pull */
+    GPIO_InitStruct.Pin = Step1_Pin;  /* GPIO_PIN_1 */
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(Step1_GPIO_Port, &GPIO_InitStruct);
+
+    /* Configure PA6 (TIM3_CH1) as alternate function push-pull */
+    GPIO_InitStruct.Pin = Step2_Pin;  /* GPIO_PIN_6 */
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(Step2_GPIO_Port, &GPIO_InitStruct);
+
+    return STEPPER_TIMER_OK;
 }

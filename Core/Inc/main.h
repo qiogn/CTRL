@@ -16,21 +16,21 @@ void Error_Handler(void);
 #define LED_Pin         GPIO_PIN_13
 #define LED_GPIO_Port   GPIOC
 
-/* 上轴：PB0 / PB1 / PB10 */
-#define EN1_Pin         GPIO_PIN_0
+/* 上轴：EN=PB10, STEP=PB1, DIR=PB0 */
+#define EN1_Pin         GPIO_PIN_10
 #define EN1_GPIO_Port   GPIOB
 
 #define Step1_Pin       GPIO_PIN_1
 #define Step1_GPIO_Port GPIOB
 
-#define Dir1_Pin        GPIO_PIN_10
+#define Dir1_Pin        GPIO_PIN_0
 #define Dir1_GPIO_Port  GPIOB
 
 /* 激光控制：PB15 */
 #define LASER_Pin       GPIO_PIN_15
 #define LASER_GPIO_Port GPIOB
 
-/* 下轴：PA8 / PA9 / PA10 */
+/* 下轴：EN=PA8, STEP=PA9, DIR=PA10 */
 #define EN2_Pin         GPIO_PIN_8
 #define EN2_GPIO_Port   GPIOA
 

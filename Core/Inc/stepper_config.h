@@ -63,9 +63,9 @@ extern "C" {
 
 /* PWM channel assignments */
 /* Note: TIM_CHANNEL_x are defined in stm32f1xx_hal_tim.h */
-/* Using numeric values for compatibility */
-#define MOTOR1_PWM_CHANNEL          0x00000000U  /* TIM_CHANNEL_1 */
-#define MOTOR2_PWM_CHANNEL          0x00000004U  /* TIM_CHANNEL_2 */
+#include "stm32f1xx_hal_tim.h"
+#define MOTOR1_PWM_CHANNEL          TIM_CHANNEL_4  /* PB1: TIM3_CH4 */
+#define MOTOR2_PWM_CHANNEL          TIM_CHANNEL_1  /* PA6: TIM3_CH1 - NOTE: User wants PA9 but PA9 doesn't have TIM3 */
 
 /* Timer channel aliases for stepper_timer.c */
 #define STEPPER_TIMER_CHANNEL_1     MOTOR1_PWM_CHANNEL

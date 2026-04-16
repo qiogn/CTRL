@@ -40,9 +40,10 @@ typedef enum
 #define INPUT_LIMIT_X 160
 #define INPUT_LIMIT_Y 100
 
-/* 死区：中心区域不响应 */
-#define CENTER_DEADBAND_X 6
-#define CENTER_DEADBAND_Y 6
+/* 瞄准判定：误差进入该范围后开激光 */
+#define AIM_LOCK_DEADBAND_X 3
+#define AIM_LOCK_DEADBAND_Y 3
+#define AIM_LOCK_STABLE_FRAMES 2U
 
 /* 绝对值宏 */
 #define ABS(x) ((x) < 0 ? -(x) : (x))
@@ -50,6 +51,9 @@ typedef enum
 /* 电机命令限制 */
 #define MOTOR_CMD_LIMIT_X 24
 #define MOTOR_CMD_LIMIT_Y 24
+#define AIM_STEP_DIV_X 5
+#define AIM_STEP_DIV_Y 5
+#define AIM_PULSE_WIDTH_US 500U
 /* USER CODE END PD */
 
 /* USER CODE BEGIN PV */
@@ -78,9 +82,6 @@ static void K230_ParseByte(uint8_t b);
 static void LedOn(void);
 static void LedOff(void);
 static void LedPulseVisible(uint32_t ms);
-
-static void FirmwareTagBlink(void);
-static void StepperController_Update(void);
 
 /* USER CODE END PFP */
 
@@ -221,35 +222,7 @@ static void LedPulseVisible(uint32_t ms)
   LedOff();
   HAL_Delay(ms);
 }
-
-
-
-static void FirmwareTagBlink(void)
-{
-  uint32_t i = 0U;
-
-  for (i = 0U; i < 3U; ++i)
-  {
-    LedPulseVisible(80U);
-  }
-}
-
-/**
-  * @brief  Update stepper controller state
-  * @retval None
-  */
-static void StepperController_Update(void)
-{
-  static uint32_t last_update_tick = 0;
-  uint32_t current_tick = HAL_GetTick();
-
-  /* Update controller every 1ms */
-  if (current_tick - last_update_tick >= 1)
-  {
-    last_update_tick = current_tick;
-    StepperCtrl_Update();
-  }
-}
+/* Stepper controller update removed - using software delay version */
 
 /* USER CODE END 0 */
 
@@ -263,6 +236,8 @@ int main(void)
   int16_t motor_cmd_y = 0;
   uint32_t handled_frame_count = 0U;
   uint32_t latest_frame_count = 0U;
+  uint32_t stable_lock_frames = 0U;
+  uint8_t laser_fired = 0U;
 
   HAL_Init();
   SystemClock_Config();
@@ -279,19 +254,18 @@ int main(void)
   /* 确保电机被禁用 */
   peripheral_motor_enable(MOTOR_AXIS_1, 0);
   peripheral_motor_enable(MOTOR_AXIS_2, 0);
-  HAL_Delay(150U);
-  FirmwareTagBlink();
-
-  /* 简单电机测试：使用peripheral_lib API让两个电机各转50步 */
-  peripheral_motor_move(MOTOR_AXIS_1, 50, DEFAULT_PULSE_WIDTH_US);
-  peripheral_motor_move(MOTOR_AXIS_2, 50, DEFAULT_PULSE_WIDTH_US);
-  HAL_Delay(500U);
 
   K230_ResetParser();
   Uart_StartReceiveIT();
 
   while (1)
   {
+    if (laser_fired != 0U)
+    {
+      HAL_Delay(1U);
+      continue;
+    }
+
     /* 使用临界区保护共享数据，而不是禁用所有中断 */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -314,28 +288,51 @@ int main(void)
       if (err_y > INPUT_LIMIT_Y) err_y = INPUT_LIMIT_Y;
       if (err_y < -INPUT_LIMIT_Y) err_y = -INPUT_LIMIT_Y;
 
-      /* 应用死区：中心区域不响应 */
-      if (ABS(err_x) <= CENTER_DEADBAND_X) err_x = 0;
-      if (ABS(err_y) <= CENTER_DEADBAND_Y) err_y = 0;
-
-      /* 简单映射：超过死区则移动1步 */
-      motor_cmd_x = (err_x > 0) ? 1 : ((err_x < 0) ? -1 : 0);
-      motor_cmd_y = (err_y > 0) ? 1 : ((err_y < 0) ? -1 : 0);
-
-      /* 发送电机控制命令：使用新的peripheral_lib API */
-      /* motor1 = 竖直轴(Y), motor2 = 水平轴(X) */
-      if (motor_cmd_y != 0)
+      if ((ABS(err_x) <= AIM_LOCK_DEADBAND_X) &&
+          (ABS(err_y) <= AIM_LOCK_DEADBAND_Y))
       {
-        peripheral_motor_move(MOTOR_AXIS_1, motor_cmd_y, DEFAULT_PULSE_WIDTH_US);
+        if (stable_lock_frames < AIM_LOCK_STABLE_FRAMES)
+        {
+          stable_lock_frames += 1U;
+        }
       }
-      if (motor_cmd_x != 0)
+      else
       {
-        peripheral_motor_move(MOTOR_AXIS_2, motor_cmd_x, DEFAULT_PULSE_WIDTH_US);
+        stable_lock_frames = 0U;
+      }
+
+      motor_cmd_x = err_x / AIM_STEP_DIV_X;
+      motor_cmd_y = err_y / AIM_STEP_DIV_Y;
+
+      if ((motor_cmd_x == 0) && (err_x != 0) && (ABS(err_x) > AIM_LOCK_DEADBAND_X))
+      {
+        motor_cmd_x = (err_x > 0) ? 1 : -1;
+      }
+
+      if ((motor_cmd_y == 0) && (err_y != 0) && (ABS(err_y) > AIM_LOCK_DEADBAND_Y))
+      {
+        motor_cmd_y = (err_y > 0) ? 1 : -1;
+      }
+
+      if (motor_cmd_x > MOTOR_CMD_LIMIT_X) motor_cmd_x = MOTOR_CMD_LIMIT_X;
+      if (motor_cmd_x < -MOTOR_CMD_LIMIT_X) motor_cmd_x = -MOTOR_CMD_LIMIT_X;
+      if (motor_cmd_y > MOTOR_CMD_LIMIT_Y) motor_cmd_y = MOTOR_CMD_LIMIT_Y;
+      if (motor_cmd_y < -MOTOR_CMD_LIMIT_Y) motor_cmd_y = -MOTOR_CMD_LIMIT_Y;
+
+      if ((stable_lock_frames < AIM_LOCK_STABLE_FRAMES) &&
+          ((motor_cmd_x != 0) || (motor_cmd_y != 0)))
+      {
+        /* motor1 = vertical axis (Y), motor2 = horizontal axis (X) */
+        DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, AIM_PULSE_WIDTH_US);
+      }
+
+      if ((laser_fired == 0U) &&
+          (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES))
+      {
+        peripheral_laser_on();
+        laser_fired = 1U;
       }
     }
-
-    /* 更新步进电机控制器状态 */
-    StepperController_Update();
 
     /* 短暂延时以降低CPU使用率 */
     HAL_Delay(1U);
