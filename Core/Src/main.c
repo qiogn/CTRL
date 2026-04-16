@@ -80,6 +80,7 @@ static void LedOff(void);
 static void LedPulseVisible(uint32_t ms);
 
 static void FirmwareTagBlink(void);
+static void StepperController_Update(void);
 
 /* USER CODE END PFP */
 
@@ -233,6 +234,23 @@ static void FirmwareTagBlink(void)
   }
 }
 
+/**
+  * @brief  Update stepper controller state
+  * @retval None
+  */
+static void StepperController_Update(void)
+{
+  static uint32_t last_update_tick = 0;
+  uint32_t current_tick = HAL_GetTick();
+
+  /* Update controller every 1ms */
+  if (current_tick - last_update_tick >= 1)
+  {
+    last_update_tick = current_tick;
+    StepperCtrl_Update();
+  }
+}
+
 /* USER CODE END 0 */
 
 int main(void)
@@ -274,11 +292,13 @@ int main(void)
 
   while (1)
   {
+    /* 使用临界区保护共享数据，而不是禁用所有中断 */
+    uint32_t primask = __get_PRIMASK();
     __disable_irq();
     latest_frame_count = g_uart_valid_frame_count;
     cmd_x = g_uart_last_parsed_x;
     cmd_y = g_uart_last_parsed_y;
-    __enable_irq();
+    __set_PRIMASK(primask);
 
     if (latest_frame_count != handled_frame_count)
     {
@@ -302,16 +322,23 @@ int main(void)
       motor_cmd_x = (err_x > 0) ? 1 : ((err_x < 0) ? -1 : 0);
       motor_cmd_y = (err_y > 0) ? 1 : ((err_y < 0) ? -1 : 0);
 
-      /* 发送电机控制命令：使用peripheral_lib API */
+      /* 发送电机控制命令：使用新的peripheral_lib API */
       /* motor1 = 竖直轴(Y), motor2 = 水平轴(X) */
-      peripheral_motor_move(MOTOR_AXIS_1, motor_cmd_y, DEFAULT_PULSE_WIDTH_US);
-      peripheral_motor_move(MOTOR_AXIS_2, motor_cmd_x, DEFAULT_PULSE_WIDTH_US);
+      if (motor_cmd_y != 0)
+      {
+        peripheral_motor_move(MOTOR_AXIS_1, motor_cmd_y, DEFAULT_PULSE_WIDTH_US);
+      }
+      if (motor_cmd_x != 0)
+      {
+        peripheral_motor_move(MOTOR_AXIS_2, motor_cmd_x, DEFAULT_PULSE_WIDTH_US);
+      }
     }
-    else
-    {
-      /* 没有新数据时短暂延时 */
-      HAL_Delay(1U);
-    }
+
+    /* 更新步进电机控制器状态 */
+    StepperController_Update();
+
+    /* 短暂延时以降低CPU使用率 */
+    HAL_Delay(1U);
   }
 }
 

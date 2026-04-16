@@ -55,6 +55,8 @@ typedef enum {
 #define DEFAULT_UART_BAUDRATE  115200
 #define DEFAULT_PULSE_WIDTH_US 950
 
+/* Stepper motor configuration - use values from stepper_config.h */
+
 /* Exported functions --------------------------------------------------------*/
 
 /* GPIO configuration functions */
@@ -71,7 +73,12 @@ UART_HandleTypeDef* peripheral_get_uart_handle(UART_Port_t uart_port);
 /* Motor control functions */
 void peripheral_motor_init(Motor_Axis_t axis);
 void peripheral_motor_move(Motor_Axis_t axis, int16_t steps, uint16_t pulse_width_us);
+void peripheral_motor_move_smooth(Motor_Axis_t axis, int32_t steps, uint32_t speed_hz);
 void peripheral_motor_enable(Motor_Axis_t axis, uint8_t enable);
+void peripheral_motor_set_speed(Motor_Axis_t axis, uint32_t speed_hz);
+uint32_t peripheral_motor_get_speed(Motor_Axis_t axis);
+void peripheral_motor_stop(Motor_Axis_t axis);
+void peripheral_motor_stop_all(void);
 
 /* Laser control functions */
 void peripheral_laser_init(void);

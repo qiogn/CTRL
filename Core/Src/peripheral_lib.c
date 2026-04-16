@@ -8,7 +8,13 @@
 #include "peripheral_lib.h"
 #include "gpio.h"
 #include "usart.h"
-#include "dual_stepper.h"
+#include "stepper_timer.h"
+#include "stepper_controller.h"
+#include "stepper_config.h"
+
+/* Stepper motor control levels - same as dual_stepper.c */
+#define STEPPER_ENABLE_LEVEL GPIO_PIN_RESET
+#define STEPPER_DISABLE_LEVEL GPIO_PIN_SET
 
 /* Private variables ---------------------------------------------------------*/
 static UART_HandleTypeDef* g_uart_handle = NULL;
@@ -148,26 +154,66 @@ UART_HandleTypeDef* peripheral_get_uart_handle(UART_Port_t uart_port)
   */
 void peripheral_motor_init(Motor_Axis_t axis)
 {
-    /* Use existing dual stepper initialization */
-    DualStepper_Init();
+    /* Initialize stepper controller */
+    StepperCtrl_Init();
+
+    /* Configure default profile */
+    MotionProfile_Config_t profile_config = {
+        .max_speed_hz = DEFAULT_SPEED_HZ,
+        .start_speed_hz = MIN_SPEED_HZ,
+        .acceleration_hz_s = DEFAULT_ACCELERATION_HZ_S,
+        .deceleration_hz_s = DEFAULT_DECELERATION_HZ_S,
+        .profile_type = PROFILE_TRAPEZOIDAL
+    };
+
+    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+    StepperCtrl_ConfigureProfile(stepper_axis, &profile_config);
+
+    /* Disable motor initially */
+    peripheral_motor_enable(axis, 0);
 }
 
 /**
-  * @brief  Move stepper motor by specified number of steps
+  * @brief  Move stepper motor by specified number of steps (legacy API)
   * @param  axis: Motor axis identifier
   * @param  steps: Number of steps (positive for forward, negative for reverse)
-  * @param  pulse_width_us: Pulse width in microseconds
+  * @param  pulse_width_us: Pulse width in microseconds (ignored, using timer control)
   * @retval None
   */
 void peripheral_motor_move(Motor_Axis_t axis, int16_t steps, uint16_t pulse_width_us)
 {
-    if (axis == MOTOR_AXIS_1) {
-        /* Motor 1: vertical axis */
-        DualStepper_MoveAxes(steps, 0, pulse_width_us);
-    } else if (axis == MOTOR_AXIS_2) {
-        /* Motor 2: horizontal axis */
-        DualStepper_MoveAxes(0, steps, pulse_width_us);
+    /* Convert to new API - use default frequency based on pulse width */
+    uint32_t frequency_hz = 1000000U / pulse_width_us;  /* Convert us to Hz */
+
+    /* Limit frequency to valid range */
+    if (frequency_hz < MIN_SPEED_HZ) {
+        frequency_hz = MIN_SPEED_HZ;
+    } else if (frequency_hz > MAX_SPEED_HZ) {
+        frequency_hz = MAX_SPEED_HZ;
     }
+
+    peripheral_motor_move_smooth(axis, (int32_t)steps, frequency_hz);
+}
+
+/**
+  * @brief  Move stepper motor with smooth acceleration (new API)
+  * @param  axis: Motor axis identifier
+  * @param  steps: Number of steps (positive for forward, negative for reverse)
+  * @param  speed_hz: Speed in Hz
+  * @retval None
+  */
+void peripheral_motor_move_smooth(Motor_Axis_t axis, int32_t steps, uint32_t speed_hz)
+{
+    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+
+    /* Set speed */
+    StepperCtrl_SetSpeed(stepper_axis, speed_hz);
+
+    /* Enable motor */
+    peripheral_motor_enable(axis, 1);
+
+    /* Move relative steps */
+    StepperCtrl_MoveRelative(stepper_axis, steps);
 }
 
 /**
@@ -178,9 +224,69 @@ void peripheral_motor_move(Motor_Axis_t axis, int16_t steps, uint16_t pulse_widt
   */
 void peripheral_motor_enable(Motor_Axis_t axis, uint8_t enable)
 {
-    /* Note: This function needs to be implemented in dual_stepper.c
-       Currently using the existing hold enable function */
-    DualStepper_SetHoldEnabled(enable);
+    /* Enable/disable specific motor axis */
+    if (axis == MOTOR_AXIS_1) {
+        /* Motor 1: EN1 pin (PB0) */
+        HAL_GPIO_WritePin(EN1_GPIO_Port, EN1_Pin, enable ? STEPPER_ENABLE_LEVEL : STEPPER_DISABLE_LEVEL);
+    } else if (axis == MOTOR_AXIS_2) {
+        /* Motor 2: EN2 pin (PA8) */
+        HAL_GPIO_WritePin(EN2_GPIO_Port, EN2_Pin, enable ? STEPPER_ENABLE_LEVEL : STEPPER_DISABLE_LEVEL);
+    }
+}
+
+/**
+  * @brief  Set motor speed
+  * @param  axis: Motor axis identifier
+  * @param  speed_hz: Speed in Hz
+  * @retval None
+  */
+void peripheral_motor_set_speed(Motor_Axis_t axis, uint32_t speed_hz)
+{
+    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+
+    /* Limit speed to valid range */
+    if (speed_hz < STEPPER_MIN_FREQUENCY_HZ) {
+        speed_hz = STEPPER_MIN_FREQUENCY_HZ;
+    } else if (speed_hz > STEPPER_MAX_FREQUENCY_HZ) {
+        speed_hz = STEPPER_MAX_FREQUENCY_HZ;
+    }
+
+    StepperCtrl_SetSpeed(stepper_axis, speed_hz);
+}
+
+/**
+  * @brief  Get motor speed
+  * @param  axis: Motor axis identifier
+  * @retval Current speed in Hz
+  */
+uint32_t peripheral_motor_get_speed(Motor_Axis_t axis)
+{
+    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+    uint32_t speed_hz = 0;
+
+    StepperCtrl_GetSpeed(stepper_axis, &speed_hz);
+
+    return speed_hz;
+}
+
+/**
+  * @brief  Stop motor movement
+  * @param  axis: Motor axis identifier
+  * @retval None
+  */
+void peripheral_motor_stop(Motor_Axis_t axis)
+{
+    Stepper_Axis_t stepper_axis = (axis == MOTOR_AXIS_1) ? STEPPER_AXIS_1 : STEPPER_AXIS_2;
+    StepperCtrl_Stop(stepper_axis);
+}
+
+/**
+  * @brief  Stop all motors
+  * @retval None
+  */
+void peripheral_motor_stop_all(void)
+{
+    StepperCtrl_StopAll();
 }
 
 /**

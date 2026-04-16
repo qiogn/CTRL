@@ -425,6 +425,11 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_hal_msp.c</FilePath>
             </File>
+            <File>
+              <FileName>peripheral_lib.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/peripheral_lib.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
