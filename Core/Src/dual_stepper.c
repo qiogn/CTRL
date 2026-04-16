@@ -142,7 +142,7 @@ void DualStepper_Init(void)
     HAL_GPIO_WritePin(Step2_GPIO_Port, Step2_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(Dir2_GPIO_Port, Dir2_Pin, GPIO_PIN_RESET);
 
-    g_dual_stepper_hold_enabled = 0U;
+    g_dual_stepper_hold_enabled = 1U;
 }
 
 /* 保持使能设置 - 简化版 */
