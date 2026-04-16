@@ -43,6 +43,10 @@ typedef enum
 /* 瞄准判定：误差进入该范围后开激光 */
 #define AIM_LOCK_DEADBAND_X 3
 #define AIM_LOCK_DEADBAND_Y 3
+#define AIM_RELEASE_DEADBAND_X 8
+#define AIM_RELEASE_DEADBAND_Y 8
+#define AIM_MOTION_DEADBAND_X 6
+#define AIM_MOTION_DEADBAND_Y 6
 #define AIM_LOCK_STABLE_FRAMES 2U
 
 /* 绝对值宏 */
@@ -53,7 +57,17 @@ typedef enum
 #define MOTOR_CMD_LIMIT_Y 24
 #define AIM_STEP_DIV_X 5
 #define AIM_STEP_DIV_Y 5
+#define AIM_STEP_DIV_SLOW_X 9
+#define AIM_STEP_DIV_SLOW_Y 9
+#define AIM_STEP_DIV_FINE_X 14
+#define AIM_STEP_DIV_FINE_Y 14
+#define AIM_SLOW_BAND_X 24
+#define AIM_SLOW_BAND_Y 16
+#define AIM_FINE_BAND_X 12
+#define AIM_FINE_BAND_Y 10
 #define AIM_PULSE_WIDTH_US 500U
+#define AIM_PULSE_WIDTH_SLOW_US 800U
+#define AIM_PULSE_WIDTH_FINE_US 1200U
 /* USER CODE END PD */
 
 /* USER CODE BEGIN PV */
@@ -234,10 +248,12 @@ int main(void)
   int16_t err_y = 0;
   int16_t motor_cmd_x = 0;
   int16_t motor_cmd_y = 0;
+  uint16_t pulse_width_us = AIM_PULSE_WIDTH_US;
   uint32_t handled_frame_count = 0U;
   uint32_t latest_frame_count = 0U;
   uint32_t stable_lock_frames = 0U;
   uint8_t laser_enabled = 0U;
+  uint8_t aim_locked = 0U;
 
   HAL_Init();
   SystemClock_Config();
@@ -296,15 +312,54 @@ int main(void)
         stable_lock_frames = 0U;
       }
 
-      motor_cmd_x = err_x / AIM_STEP_DIV_X;
-      motor_cmd_y = err_y / AIM_STEP_DIV_Y;
+      if (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES)
+      {
+        aim_locked = 1U;
+      }
+      else if ((ABS(err_x) >= AIM_RELEASE_DEADBAND_X) ||
+               (ABS(err_y) >= AIM_RELEASE_DEADBAND_Y))
+      {
+        aim_locked = 0U;
+      }
 
-      if ((motor_cmd_x == 0) && (err_x != 0) && (ABS(err_x) > AIM_LOCK_DEADBAND_X))
+      if (ABS(err_x) <= AIM_MOTION_DEADBAND_X)
+      {
+        err_x = 0;
+      }
+
+      if (ABS(err_y) <= AIM_MOTION_DEADBAND_Y)
+      {
+        err_y = 0;
+      }
+
+      pulse_width_us = AIM_PULSE_WIDTH_US;
+
+      if ((ABS(err_x) <= AIM_FINE_BAND_X) &&
+          (ABS(err_y) <= AIM_FINE_BAND_Y))
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_FINE_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_FINE_Y;
+        pulse_width_us = AIM_PULSE_WIDTH_FINE_US;
+      }
+      else if ((ABS(err_x) <= AIM_SLOW_BAND_X) &&
+               (ABS(err_y) <= AIM_SLOW_BAND_Y))
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_SLOW_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_SLOW_Y;
+        pulse_width_us = AIM_PULSE_WIDTH_SLOW_US;
+      }
+      else
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_Y;
+      }
+
+      if ((motor_cmd_x == 0) && (err_x != 0))
       {
         motor_cmd_x = (err_x > 0) ? 1 : -1;
       }
 
-      if ((motor_cmd_y == 0) && (err_y != 0) && (ABS(err_y) > AIM_LOCK_DEADBAND_Y))
+      if ((motor_cmd_y == 0) && (err_y != 0))
       {
         motor_cmd_y = (err_y > 0) ? 1 : -1;
       }
@@ -317,10 +372,10 @@ int main(void)
       if ((motor_cmd_x != 0) || (motor_cmd_y != 0))
       {
         /* motor1 = vertical axis (Y), motor2 = horizontal axis (X) */
-        DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, AIM_PULSE_WIDTH_US);
+        DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, pulse_width_us);
       }
 
-      if (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES)
+      if (aim_locked != 0U)
       {
         if (laser_enabled == 0U)
         {
