@@ -66,6 +66,7 @@ uint8_t peripheral_gpio_read(uint16_t pin, GPIO_TypeDef* port);
 void peripheral_uart_init(UART_Port_t uart_port, uint32_t baudrate);
 void peripheral_uart_send(uint8_t* data, uint16_t length);
 uint16_t peripheral_uart_receive(uint8_t* buffer, uint16_t max_length, uint32_t timeout);
+UART_HandleTypeDef* peripheral_get_uart_handle(UART_Port_t uart_port);
 
 /* Motor control functions */
 void peripheral_motor_init(Motor_Axis_t axis);

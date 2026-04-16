@@ -128,6 +128,20 @@ uint16_t peripheral_uart_receive(uint8_t* buffer, uint16_t max_length, uint32_t 
 }
 
 /**
+  * @brief  Get UART handle for direct HAL operations
+  * @param  uart_port: UART port identifier
+  * @retval Pointer to UART_HandleTypeDef, or NULL if not initialized
+  */
+UART_HandleTypeDef* peripheral_get_uart_handle(UART_Port_t uart_port)
+{
+    /* Currently only supports UART2 */
+    if (uart_port == UART_PORT_2) {
+        return g_uart_handle;
+    }
+    return NULL;
+}
+
+/**
   * @brief  Initialize stepper motor
   * @param  axis: Motor axis identifier
   * @retval None

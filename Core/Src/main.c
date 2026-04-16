@@ -8,10 +8,9 @@
 /* USER CODE END Header */
 
 #include "main.h"
-#include "usart.h"
-#include "gpio.h"
-#include "dual_stepper.h"
 #include "peripheral_lib.h"
+#include "dual_stepper.h"
+#include "usart.h"  /* 需要huart2的定义 */
 
 /* USER CODE BEGIN PTD */
 typedef enum
@@ -80,39 +79,21 @@ static void LedOn(void);
 static void LedOff(void);
 static void LedPulseVisible(uint32_t ms);
 
-static void MotorDisableAll(void);
 static void FirmwareTagBlink(void);
 
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
 
-/* lower motor: PB0/PB1/PB10 */
-#define MOTOR_LOWER_EN_PORT EN2_GPIO_Port
-#define MOTOR_LOWER_EN_PIN EN2_Pin
-#define MOTOR_LOWER_STEP_PORT Step2_GPIO_Port
-#define MOTOR_LOWER_STEP_PIN Step2_Pin
-#define MOTOR_LOWER_DIR_PORT Dir2_GPIO_Port
-#define MOTOR_LOWER_DIR_PIN Dir2_Pin
-
-/* upper motor: PA5/PA6/PA7 */
-#define MOTOR_UPPER_EN_PORT EN1_GPIO_Port
-#define MOTOR_UPPER_EN_PIN EN1_Pin
-#define MOTOR_UPPER_STEP_PORT Step1_GPIO_Port
-#define MOTOR_UPPER_STEP_PIN Step1_Pin
-#define MOTOR_UPPER_DIR_PORT Dir1_GPIO_Port
-#define MOTOR_UPPER_DIR_PIN Dir1_Pin
 
 
-static void LaserOff(void)
-{
-  /* PB1低电平关闭激光继电器 */
-  HAL_GPIO_WritePin(LASER_GPIO_Port, LASER_Pin, GPIO_PIN_RESET);
-}
 
 static void Uart_StartReceiveIT(void)
 {
-  (void)HAL_UART_Receive_IT(&huart2, &g_uart_rx_byte, 1U);
+  UART_HandleTypeDef* uart_handle = peripheral_get_uart_handle(UART_PORT_2);
+  if (uart_handle != NULL) {
+    (void)HAL_UART_Receive_IT(uart_handle, &g_uart_rx_byte, 1U);
+  }
 }
 
 static void K230_ResetParser(void)
@@ -241,11 +222,6 @@ static void LedPulseVisible(uint32_t ms)
 }
 
 
-static void MotorDisableAll(void)
-{
-  HAL_GPIO_WritePin(MOTOR_LOWER_EN_PORT, MOTOR_LOWER_EN_PIN, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(MOTOR_UPPER_EN_PORT, MOTOR_UPPER_EN_PIN, GPIO_PIN_SET);
-}
 
 static void FirmwareTagBlink(void)
 {
@@ -273,18 +249,24 @@ int main(void)
   HAL_Init();
   SystemClock_Config();
 
-  MX_GPIO_Init();
-  MX_USART2_UART_Init();
-  DualStepper_Init();
+  /* 使用统一的peripheral库初始化 */
+  peripheral_system_init();
 
+  /* 关闭LED */
   LedOff();
-  MotorDisableAll();
-  LaserOff();  /* 确保激光关闭 */
+
+  /* 确保激光关闭（通过peripheral库） */
+  peripheral_laser_off();
+
+  /* 确保电机被禁用 */
+  peripheral_motor_enable(MOTOR_AXIS_1, 0);
+  peripheral_motor_enable(MOTOR_AXIS_2, 0);
   HAL_Delay(150U);
   FirmwareTagBlink();
 
-  /* 简单电机测试：让两个电机各转50步 */
-  DualStepper_MoveAxes(50, 50, 1000);
+  /* 简单电机测试：使用peripheral_lib API让两个电机各转50步 */
+  peripheral_motor_move(MOTOR_AXIS_1, 50, DEFAULT_PULSE_WIDTH_US);
+  peripheral_motor_move(MOTOR_AXIS_2, 50, DEFAULT_PULSE_WIDTH_US);
   HAL_Delay(500U);
 
   K230_ResetParser();
@@ -320,9 +302,10 @@ int main(void)
       motor_cmd_x = (err_x > 0) ? 1 : ((err_x < 0) ? -1 : 0);
       motor_cmd_y = (err_y > 0) ? 1 : ((err_y < 0) ? -1 : 0);
 
-      /* 发送电机控制命令 */
+      /* 发送电机控制命令：使用peripheral_lib API */
       /* motor1 = 竖直轴(Y), motor2 = 水平轴(X) */
-      DualStepper_SetTrackingCommand(motor_cmd_y, motor_cmd_x);
+      peripheral_motor_move(MOTOR_AXIS_1, motor_cmd_y, DEFAULT_PULSE_WIDTH_US);
+      peripheral_motor_move(MOTOR_AXIS_2, motor_cmd_x, DEFAULT_PULSE_WIDTH_US);
     }
     else
     {
