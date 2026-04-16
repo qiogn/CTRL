@@ -44,6 +44,12 @@ void StepperTest_RunPositionTest(void);
   */
 void StepperTest_RunEmergencyStopTest(void);
 
+/**
+  * @brief  Run direction control test
+  * @retval None
+  */
+void StepperTest_RunDirectionTest(void);
+
 #ifdef __cplusplus
 }
 #endif

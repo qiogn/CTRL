@@ -369,6 +369,92 @@ void StepperTest_RunEmergencyStopTest(void)
 /* Private functions ---------------------------------------------------------*/
 
 /**
+  * @brief  Run direction control test
+  * @retval None
+  */
+void StepperTest_RunDirectionTest(void)
+{
+    printf("Starting direction control test...\r\n");
+
+    /* Initialize stepper controller */
+    if (StepperCtrl_Init() != STEPPER_CTRL_OK)
+    {
+        printf("Error: Failed to initialize stepper controller\r\n");
+        return;
+    }
+
+    printf("Testing Motor 1 direction control...\r\n");
+    peripheral_motor_enable(MOTOR_AXIS_1, 1);
+
+    /* Test forward direction */
+    printf("Setting direction: FORWARD\r\n");
+    StepperCtrl_MoveRelative(STEPPER_AXIS_1, 10);  /* Small movement to test direction */
+
+    /* Wait for movement to complete */
+    uint8_t is_moving = 1;
+    while (is_moving)
+    {
+        StepperCtrl_IsMoving(STEPPER_AXIS_1, &is_moving);
+        StepperCtrl_Update();
+        test_delay_ms(10);
+    }
+
+    printf("Forward movement completed\r\n");
+    test_delay_ms(500);
+
+    /* Test reverse direction */
+    printf("Setting direction: REVERSE\r\n");
+    StepperCtrl_MoveRelative(STEPPER_AXIS_1, -10);  /* Small movement to test direction */
+
+    /* Wait for movement to complete */
+    is_moving = 1;
+    while (is_moving)
+    {
+        StepperCtrl_IsMoving(STEPPER_AXIS_1, &is_moving);
+        StepperCtrl_Update();
+        test_delay_ms(10);
+    }
+
+    printf("Reverse movement completed\r\n");
+    test_delay_ms(500);
+
+    /* Test multiple direction changes */
+    printf("Testing multiple direction changes...\r\n");
+    for (int i = 0; i < 5; i++)
+    {
+        printf("Cycle %d: ", i + 1);
+
+        /* Forward */
+        printf("F");
+        StepperCtrl_MoveRelative(STEPPER_AXIS_1, 5);
+        is_moving = 1;
+        while (is_moving)
+        {
+            StepperCtrl_IsMoving(STEPPER_AXIS_1, &is_moving);
+            StepperCtrl_Update();
+            test_delay_ms(1);
+        }
+
+        /* Reverse */
+        printf("R");
+        StepperCtrl_MoveRelative(STEPPER_AXIS_1, -5);
+        is_moving = 1;
+        while (is_moving)
+        {
+            StepperCtrl_IsMoving(STEPPER_AXIS_1, &is_moving);
+            StepperCtrl_Update();
+            test_delay_ms(1);
+        }
+
+        printf(" ");
+    }
+    printf("\r\n");
+
+    printf("Direction control test completed\r\n");
+    peripheral_motor_enable(MOTOR_AXIS_1, 0);
+}
+
+/**
   * @brief  Simple delay function
   * @param  ms: Delay in milliseconds
   * @retval None
