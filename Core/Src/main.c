@@ -279,10 +279,9 @@ int main(void)
   /* 确保激光关闭（通过peripheral库） */
   peripheral_laser_off();
 
-  /* 保持使能，防止云台失去保持力矩 */
-  DualStepper_SetHoldEnabled(1U);
-  peripheral_motor_enable(MOTOR_AXIS_1, 1U);
-  peripheral_motor_enable(MOTOR_AXIS_2, 1U);
+  /* 确保电机被禁用 */
+  peripheral_motor_enable(MOTOR_AXIS_1, 0);
+  peripheral_motor_enable(MOTOR_AXIS_2, 0);
 
   K230_ResetParser();
   Uart_StartReceiveIT();
@@ -291,6 +290,12 @@ int main(void)
 
   while (1)
   {
+    if (laser_fired != 0U)
+    {
+      HAL_Delay(1U);
+      continue;
+    }
+
     /* 使用临界区保护共享数据，而不是禁用所有中断 */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -385,7 +390,8 @@ int main(void)
       if (motor_cmd_y > MOTOR_CMD_LIMIT_Y) motor_cmd_y = MOTOR_CMD_LIMIT_Y;
       if (motor_cmd_y < -MOTOR_CMD_LIMIT_Y) motor_cmd_y = -MOTOR_CMD_LIMIT_Y;
 
-      if ((motor_cmd_x != 0) || (motor_cmd_y != 0))
+      if ((stable_lock_frames < AIM_LOCK_STABLE_FRAMES) &&
+          ((motor_cmd_x != 0) || (motor_cmd_y != 0)))
       {
         /* motor1 = vertical axis (Y), motor2 = horizontal axis (X) */
         DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, pulse_width_us);
