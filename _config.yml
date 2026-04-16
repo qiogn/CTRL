@@ -1,0 +1,53 @@
+# GitHub Pages Configuration for STM32 CTRL Project
+
+title: STM32F103 CTRL Project
+description: Dual stepper motor control system with vision feedback
+baseurl: "/CTRL" # the subpath of your site, e.g. /blog
+url: "https://qiogn.github.io" # the base hostname & protocol for your site
+
+# Build settings
+markdown: kramdown
+highlighter: rouge
+theme: jekyll-theme-minimal
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+
+# Exclude from processing
+exclude:
+  - .gitignore
+  - README-MIGRATION.md
+  - .github/
+  - build/
+  - MDK-ARM/CTRL/
+  - .claude/
+  - K230/
+  - "*.mp4"
+  - "*.png"
+  - "*.jpg"
+  - "*.jpeg"
+  - "*.gif"
+
+# Navigation
+navigation:
+  - title: Home
+    url: /
+  - title: GitHub
+    url: https://github.com/qiogn/CTRL
+  - title: Releases
+    url: https://github.com/qiogn/CTRL/releases
+  - title: Issues
+    url: https://github.com/qiogn/CTRL/issues
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: "default"
+  - scope:
+      path: "docs"
+      type: "pages"
+    values:
+      layout: "default"
