@@ -35,6 +35,7 @@ typedef enum
 #define K230_FRAME_HEIGHT 360U
 #define K230_CENTER_X ((int16_t)(K230_FRAME_WIDTH / 2U))
 #define K230_CENTER_Y ((int16_t)(K230_FRAME_HEIGHT / 2U))
+#define K230_FRAME_TIMEOUT_MS 120U
 
 /* 输入限制：最大偏移量 */
 #define INPUT_LIMIT_X 160
@@ -43,6 +44,10 @@ typedef enum
 /* 瞄准判定：误差进入该范围后开激光 */
 #define AIM_LOCK_DEADBAND_X 3
 #define AIM_LOCK_DEADBAND_Y 3
+#define AIM_RELEASE_DEADBAND_X 8
+#define AIM_RELEASE_DEADBAND_Y 8
+#define AIM_MOTION_DEADBAND_X 6
+#define AIM_MOTION_DEADBAND_Y 6
 #define AIM_LOCK_STABLE_FRAMES 2U
 
 /* 绝对值宏 */
@@ -53,7 +58,24 @@ typedef enum
 #define MOTOR_CMD_LIMIT_Y 24
 #define AIM_STEP_DIV_X 5
 #define AIM_STEP_DIV_Y 5
+#define AIM_STEP_DIV_SLOW_X 9
+#define AIM_STEP_DIV_SLOW_Y 9
+#define AIM_STEP_DIV_FINE_X 14
+#define AIM_STEP_DIV_FINE_Y 14
+#define AIM_SLOW_BAND_X 24
+#define AIM_SLOW_BAND_Y 16
+#define AIM_FINE_BAND_X 12
+#define AIM_FINE_BAND_Y 10
 #define AIM_PULSE_WIDTH_US 500U
+#define AIM_PULSE_WIDTH_SLOW_US 800U
+#define AIM_PULSE_WIDTH_FINE_US 1200U
+
+#define PATROL_INTERVAL_MS 25U
+#define PATROL_PULSE_WIDTH_US 600U
+#define PATROL_X_STEP 16
+#define PATROL_Y_STEP 8
+#define PATROL_X_PHASE_STEPS 60U
+#define PATROL_Y_PHASE_STEPS 20U
 /* USER CODE END PD */
 
 /* USER CODE BEGIN PV */
@@ -234,10 +256,16 @@ int main(void)
   int16_t err_y = 0;
   int16_t motor_cmd_x = 0;
   int16_t motor_cmd_y = 0;
+  uint16_t pulse_width_us = AIM_PULSE_WIDTH_US;
   uint32_t handled_frame_count = 0U;
   uint32_t latest_frame_count = 0U;
+  uint32_t last_frame_tick = 0U;
+  uint32_t last_patrol_tick = 0U;
   uint32_t stable_lock_frames = 0U;
+  uint32_t patrol_phase_count = 0U;
   uint8_t laser_enabled = 0U;
+  uint8_t aim_locked = 0U;
+  uint8_t patrol_phase = 0U;
 
   HAL_Init();
   SystemClock_Config();
@@ -258,6 +286,8 @@ int main(void)
 
   K230_ResetParser();
   Uart_StartReceiveIT();
+  last_frame_tick = HAL_GetTick();
+  last_patrol_tick = HAL_GetTick();
 
   while (1)
   {
@@ -272,6 +302,8 @@ int main(void)
     if (latest_frame_count != handled_frame_count)
     {
       handled_frame_count = latest_frame_count;
+      last_frame_tick = HAL_GetTick();
+      patrol_phase_count = 0U;
 
       /* 计算相对于中心的偏移 */
       err_x = (int16_t)cmd_x - K230_CENTER_X;
@@ -296,15 +328,54 @@ int main(void)
         stable_lock_frames = 0U;
       }
 
-      motor_cmd_x = err_x / AIM_STEP_DIV_X;
-      motor_cmd_y = err_y / AIM_STEP_DIV_Y;
+      if (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES)
+      {
+        aim_locked = 1U;
+      }
+      else if ((ABS(err_x) >= AIM_RELEASE_DEADBAND_X) ||
+               (ABS(err_y) >= AIM_RELEASE_DEADBAND_Y))
+      {
+        aim_locked = 0U;
+      }
 
-      if ((motor_cmd_x == 0) && (err_x != 0) && (ABS(err_x) > AIM_LOCK_DEADBAND_X))
+      if (ABS(err_x) <= AIM_MOTION_DEADBAND_X)
+      {
+        err_x = 0;
+      }
+
+      if (ABS(err_y) <= AIM_MOTION_DEADBAND_Y)
+      {
+        err_y = 0;
+      }
+
+      pulse_width_us = AIM_PULSE_WIDTH_US;
+
+      if ((ABS(err_x) <= AIM_FINE_BAND_X) &&
+          (ABS(err_y) <= AIM_FINE_BAND_Y))
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_FINE_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_FINE_Y;
+        pulse_width_us = AIM_PULSE_WIDTH_FINE_US;
+      }
+      else if ((ABS(err_x) <= AIM_SLOW_BAND_X) &&
+               (ABS(err_y) <= AIM_SLOW_BAND_Y))
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_SLOW_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_SLOW_Y;
+        pulse_width_us = AIM_PULSE_WIDTH_SLOW_US;
+      }
+      else
+      {
+        motor_cmd_x = err_x / AIM_STEP_DIV_X;
+        motor_cmd_y = err_y / AIM_STEP_DIV_Y;
+      }
+
+      if ((motor_cmd_x == 0) && (err_x != 0))
       {
         motor_cmd_x = (err_x > 0) ? 1 : -1;
       }
 
-      if ((motor_cmd_y == 0) && (err_y != 0) && (ABS(err_y) > AIM_LOCK_DEADBAND_Y))
+      if ((motor_cmd_y == 0) && (err_y != 0))
       {
         motor_cmd_y = (err_y > 0) ? 1 : -1;
       }
@@ -317,10 +388,10 @@ int main(void)
       if ((motor_cmd_x != 0) || (motor_cmd_y != 0))
       {
         /* motor1 = vertical axis (Y), motor2 = horizontal axis (X) */
-        DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, AIM_PULSE_WIDTH_US);
+        DualStepper_MoveAxes(motor_cmd_y, motor_cmd_x, pulse_width_us);
       }
 
-      if (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES)
+      if (aim_locked != 0U)
       {
         if (laser_enabled == 0U)
         {
@@ -339,6 +410,74 @@ int main(void)
     }
 
     /* 短暂延时以降低CPU使用率 */
+    else if ((HAL_GetTick() - last_frame_tick) >= K230_FRAME_TIMEOUT_MS)
+    {
+      aim_locked = 0U;
+      stable_lock_frames = 0U;
+
+      if (laser_enabled != 0U)
+      {
+        peripheral_laser_off();
+        laser_enabled = 0U;
+      }
+
+      if ((HAL_GetTick() - last_patrol_tick) >= PATROL_INTERVAL_MS)
+      {
+        int16_t patrol_x = 0;
+        int16_t patrol_y = 0;
+
+        last_patrol_tick = HAL_GetTick();
+
+        switch (patrol_phase)
+        {
+          case 0U:
+            patrol_x = PATROL_X_STEP;
+            patrol_phase_count += 1U;
+            if (patrol_phase_count >= PATROL_X_PHASE_STEPS)
+            {
+              patrol_phase = 1U;
+              patrol_phase_count = 0U;
+            }
+            break;
+
+          case 1U:
+            patrol_y = PATROL_Y_STEP;
+            patrol_phase_count += 1U;
+            if (patrol_phase_count >= PATROL_Y_PHASE_STEPS)
+            {
+              patrol_phase = 2U;
+              patrol_phase_count = 0U;
+            }
+            break;
+
+          case 2U:
+            patrol_x = -PATROL_X_STEP;
+            patrol_phase_count += 1U;
+            if (patrol_phase_count >= PATROL_X_PHASE_STEPS)
+            {
+              patrol_phase = 3U;
+              patrol_phase_count = 0U;
+            }
+            break;
+
+          default:
+            patrol_y = -PATROL_Y_STEP;
+            patrol_phase_count += 1U;
+            if (patrol_phase_count >= PATROL_Y_PHASE_STEPS)
+            {
+              patrol_phase = 0U;
+              patrol_phase_count = 0U;
+            }
+            break;
+        }
+
+        if ((patrol_x != 0) || (patrol_y != 0))
+        {
+          DualStepper_MoveAxes(patrol_y, patrol_x, PATROL_PULSE_WIDTH_US);
+        }
+      }
+    }
+
     HAL_Delay(1U);
   }
 }
