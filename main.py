@@ -1,4 +1,5 @@
 import gc
+import math
 import time
 
 import aicube
@@ -29,6 +30,11 @@ if USE_UART:
 
 UART_FUNC_POINT = 0xF2
 UART_FUNC_LOST  = 0xF3
+UART_FUNC_DRAW_READY = 0xE1  # K230 → STM32: notify circle mode
+UART_FUNC_DRAW_POINT = 0xE2  # K230 → STM32: trajectory point
+
+CIRCLE_POINTS = 256
+CIRCLE_LOCK_FRAMES = 10
 
 has_ever_locked = False
 lost_reported = False
@@ -293,6 +299,24 @@ def uart_send_point(x, y):
 def uart_send_lost():
     uart_send_packet(UART_FUNC_LOST, [])
 
+def uart_send_draw_ready():
+    uart_send_packet(UART_FUNC_DRAW_READY, [])
+
+def uart_send_draw_point(x, y):
+    dx = max(min(int(round(x)), OUT_RGB888P_WIDTH), 0)
+    dy = max(min(int(round(y)), OUT_RGB888P_HEIGH), 0)
+    payload = [dx & 0xFF, (dx >> 8) & 0xFF, dy & 0xFF, (dy >> 8) & 0xFF]
+    uart_send_packet(UART_FUNC_DRAW_POINT, payload)
+
+def generate_circle_points(center_x, center_y, radius):
+    points = []
+    for i in range(CIRCLE_POINTS):
+        angle = 2.0 * math.pi * i / CIRCLE_POINTS
+        px = center_x + radius * math.cos(angle)
+        py = center_y - radius * math.sin(angle)  # Y向下
+        points.append((int(px), int(py)))
+    return points
+
 def center_dist2(c1, c2):
     dx = c1[0] - c2[0]
     dy = c1[1] - c2[1]
@@ -472,6 +496,12 @@ def detection():
     global has_ever_locked, lost_reported
 
     print("lock_light_fixed_center_uart start")
+
+    # Circle mode state
+    circle_mode = False
+    circle_lock_count = 0
+    circle_points = []
+    circle_point_idx = 0
 
     deploy_conf = read_deploy_config(config_path)
     kmodel_name = deploy_conf["kmodel_path"]
@@ -784,6 +814,51 @@ def detection():
                         has_ever_locked = True
                         lost_reported = False
 
+                        # --- Circle mode trigger: auto-enter when stable at center ---
+                        if not circle_mode and has_ever_locked:
+                            err_cx = aim_cx - K230_CENTER_X
+                            err_cy = aim_cy - K230_CENTER_Y
+                            if abs_i(err_cx) <= CENTER_DEAD_BAND and abs_i(err_cy) <= CENTER_DEAD_BAND:
+                                circle_lock_count += 1
+                                if circle_lock_count >= CIRCLE_LOCK_FRAMES:
+                                    circle_mode = True
+                                    circle_lock_count = 0
+                                    circle_point_idx = 0
+
+                                    # Circle center and radius
+                                    circle_cx = float(aim_cx)
+                                    circle_cy = float(aim_cy)
+
+                                    # A4 paper ratio compensation
+                                    # A4: 210×297mm (√2≈1.414), AI frame: 640×360 (16/9≈1.778)
+                                    a4_comp = (16.0 / 9.0) / 1.4142
+                                    radius_x = (box_w * 0.4) * a4_comp
+                                    radius_y = (box_h * 0.4) / a4_comp
+                                    circle_radius = max(min(radius_x, radius_y), 30.0)
+
+                                    circle_points = generate_circle_points(circle_cx, circle_cy, circle_radius)
+                                    uart_send_draw_ready()
+                                    print("[CIRCLE] R=%.1f points=%d" % (circle_radius, len(circle_points)))
+                            else:
+                                circle_lock_count = 0
+                        elif circle_mode:
+                            circle_lock_count = 0
+
+                        # --- Circle mode execution ---
+                        if circle_mode and circle_points:
+                            px, py = circle_points[circle_point_idx % CIRCLE_POINTS]
+                            uart_send_draw_point(px, py)
+                            circle_point_idx += 1
+
+                            # Draw current trajectory point on LCD
+                            px_lcd = int(px * DISPLAY_WIDTH // OUT_RGB888P_WIDTH)
+                            py_lcd = int(py * DISPLAY_HEIGHT // OUT_RGB888P_HEIGH)
+                            draw_cross(osd_img, px_lcd, py_lcd, CROSS_SIZE, (0, 255, 0, 0), 2)
+
+                            osd_img.draw_string_advanced(
+                                20, 170, 24, "CIRCLE MODE", color=(0, 255, 0)
+                            )
+
                     else:
                         lost_cnt += 1
                         last_box_xyxy = None
@@ -797,6 +872,10 @@ def detection():
 
                         kf_x.inited = False
                         kf_y.inited = False
+
+                        # Reset circle mode on target loss
+                        circle_mode = False
+                        circle_lock_count = 0
 
                         osd_img.draw_string_advanced(
                             20, 50, 24,

@@ -435,6 +435,11 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/peripheral_lib.c</FilePath>
             </File>
+            <File>
+              <FileName>circle_bresenham.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/circle_bresenham.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

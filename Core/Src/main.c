@@ -16,7 +16,8 @@
 typedef enum
 {
   CTRL_MODE_IDLE = 0U,
-  CTRL_MODE_TRACK
+  CTRL_MODE_TRACK,
+  CTRL_MODE_CIRCLE
 } CtrlMode_t;
 
 typedef enum
@@ -40,8 +41,16 @@ typedef enum
 
 #define K230_FRAME_HEAD1 0xAAU
 #define K230_FRAME_HEAD2 0xFFU
-#define K230_FRAME_FUNC_POINT 0xF2U
-#define K230_FRAME_LEN_POINT 4U
+#define K230_FRAME_FUNC_POINT  0xF2U
+#define K230_FRAME_LEN_POINT   4U
+
+/* New frame types for circle drawing */
+#define K230_FRAME_FUNC_DRAW_READY   0xE1U   /* K230 → STM32: enter circle mode */
+#define K230_FRAME_FUNC_DRAW_POINT   0xE2U   /* K230 → STM32: trajectory point (4 bytes: x,y) */
+#define K230_FRAME_LEN_DRAW_POINT    4U
+
+/* Lock threshold to trigger circle drawing */
+#define CIRCLE_LOCK_FRAMES 10U
 
 #define INPUT_LIMIT_X 160
 #define INPUT_LIMIT_Y 100
@@ -75,6 +84,10 @@ typedef enum
 #define AIM_PULSE_WIDTH_SLOW_US 2500U
 #define AIM_PULSE_WIDTH_FINE_US 5000U
 
+#define CIRCLE_PULSE_WIDTH_US    1000U   /* Pulse width for circle drawing */
+
+#define CIRCLE_DRAW_TIMEOUT_MS 10000U /* Max time for entire circle draw */
+#define STEP_TIMEOUT_MS        500U   /* Max time for single motor move */
 
 /* USER CODE END PD */
 
@@ -86,10 +99,15 @@ static volatile uint32_t g_uart_valid_frame_count = 0U;
 static volatile uint16_t g_uart_last_parsed_x = 320U;
 static volatile uint16_t g_uart_last_parsed_y = 180U;
 
+/* Circle drawing state (volatile, updated in UART ISR) */
+static volatile uint16_t g_draw_point_x = 0U;
+static volatile uint16_t g_draw_point_y = 0U;
+static volatile uint8_t  g_draw_point_new = 0U;
+
 static K230_RxState_t g_rx_state = RX_WAIT_AA;
 static uint8_t g_rx_func = 0U;
 static uint8_t g_rx_len = 0U;
-static uint8_t g_rx_data[K230_FRAME_LEN_POINT] = {0};
+static uint8_t g_rx_data[8] = {0};          /* enlarged for any frame type */
 static uint8_t g_rx_data_idx = 0U;
 static uint8_t g_rx_sc = 0U;
 static uint8_t g_rx_ac = 0U;
@@ -109,6 +127,8 @@ static void K230_ParseByte(uint8_t b);
 static void LedOn(void);
 static void LedOff(void);
 static void LedPulseVisible(uint32_t ms);
+
+static void Circle_FollowPoints(void);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
@@ -159,7 +179,10 @@ static void K230_ParseByte(uint8_t b)
 
     case RX_WAIT_LEN:
       g_rx_len = b;
-      if ((g_rx_func == K230_FRAME_FUNC_POINT) && (g_rx_len == K230_FRAME_LEN_POINT))
+      if ((g_rx_len <= sizeof(g_rx_data)) &&
+          ((g_rx_func == K230_FRAME_FUNC_POINT) ||
+           (g_rx_func == K230_FRAME_FUNC_DRAW_POINT) ||
+           (g_rx_func == K230_FRAME_FUNC_DRAW_READY)))
       {
         g_rx_data_idx = 0U;
         g_rx_state = RX_WAIT_DATA;
@@ -190,15 +213,32 @@ static void K230_ParseByte(uint8_t b)
         calc_ac = (calc_ac + g_rx_data[i]) & 0xFFU;
       }
 
-      if ((g_rx_func == K230_FRAME_FUNC_POINT) && (calc_sc == g_rx_sc) && (calc_ac == g_rx_ac))
+      if ((calc_sc == g_rx_sc) && (calc_ac == g_rx_ac))
       {
-        g_uart_last_parsed_x = (uint16_t)(g_rx_data[0] | (g_rx_data[1] << 8));
-        g_uart_last_parsed_y = (uint16_t)(g_rx_data[2] | (g_rx_data[3] << 8));
-        g_uart_valid_frame_count += 1U;
-        g_ctrl_mode = CTRL_MODE_TRACK;
-        g_last_msg_tick = HAL_GetTick();
-        g_led_blink_start = HAL_GetTick();
-        g_boot_centered = 1U;
+        if (g_rx_func == K230_FRAME_FUNC_POINT)
+        {
+          g_uart_last_parsed_x = (uint16_t)(g_rx_data[0] | (g_rx_data[1] << 8));
+          g_uart_last_parsed_y = (uint16_t)(g_rx_data[2] | (g_rx_data[3] << 8));
+          g_uart_valid_frame_count += 1U;
+          g_ctrl_mode = CTRL_MODE_TRACK;
+          g_last_msg_tick = HAL_GetTick();
+          g_led_blink_start = HAL_GetTick();
+          g_boot_centered = 1U;
+        }
+        else if (g_rx_func == K230_FRAME_FUNC_DRAW_READY)
+        {
+          /* K230 signals circle mode start */
+          g_ctrl_mode = CTRL_MODE_CIRCLE;
+          g_draw_point_new = 0U;
+        }
+        else if (g_rx_func == K230_FRAME_FUNC_DRAW_POINT)
+        {
+          /* Store trajectory point for Circle_FollowPoints to consume */
+          g_draw_point_x = (uint16_t)(g_rx_data[0] | (g_rx_data[1] << 8));
+          g_draw_point_y = (uint16_t)(g_rx_data[2] | (g_rx_data[3] << 8));
+          g_draw_point_new = 1U;
+          g_last_msg_tick = HAL_GetTick();
+        }
       }
       else
       {
@@ -231,6 +271,63 @@ static void LedPulseVisible(uint32_t ms)
   HAL_Delay(ms);
 }
 
+/**
+  * @brief  Follow K230 trajectory points (blocking, called from main loop)
+  *
+  *  Waits for DRAW_POINT frames from K230, moves motor to each point,
+  *  keeps laser ON during the entire sequence.
+  *  Exits on timeout or when K230 stops sending points.
+  */
+static void Circle_FollowPoints(void)
+{
+  uint32_t t0 = HAL_GetTick();
+  uint16_t pulse_us = CIRCLE_PULSE_WIDTH_US;
+
+  peripheral_laser_on();
+
+  while (1)
+  {
+    /* Global timeout — safety exit */
+    if ((HAL_GetTick() - t0) > CIRCLE_DRAW_TIMEOUT_MS) break;
+
+    /* Check if a new trajectory point arrived */
+    if (g_draw_point_new)
+    {
+      /* Interrupt-safe read */
+      uint32_t primask_save = __get_PRIMASK();
+      __disable_irq();
+      uint16_t px = g_draw_point_x;
+      uint16_t py = g_draw_point_y;
+      g_draw_point_new = 0U;
+      __set_PRIMASK(primask_save);
+
+      /* Convert frame coords to motor steps relative to center */
+      int16_t dx = (int16_t)px - K230_CENTER_X;
+      int16_t dy = (int16_t)py - K230_CENTER_Y;
+
+      if ((dx != 0) || (dy != 0))
+      {
+        DualStepper_MoveAxes(dx, dy, pulse_us);
+        uint32_t step_t0 = HAL_GetTick();
+        while (!DualStepper_IsMoving())
+        { if ((HAL_GetTick() - step_t0) > STEP_TIMEOUT_MS) break; }
+        step_t0 = HAL_GetTick();
+        while (DualStepper_IsMoving())
+        { if ((HAL_GetTick() - step_t0) > STEP_TIMEOUT_MS) break; }
+      }
+
+      t0 = HAL_GetTick();  /* reset timeout on each point */
+    }
+    else
+    {
+      /* No new point for a while — K230 is done or slow */
+      if ((HAL_GetTick() - g_last_msg_tick) > 500U) break;
+    }
+  }
+
+  peripheral_laser_off();
+}
+
 /* USER CODE END 0 */
 
 int main(void)
@@ -244,7 +341,6 @@ int main(void)
   uint16_t pulse_width_us = AIM_PULSE_WIDTH_US;
   uint32_t handled_frame_count = 0U;
   uint32_t latest_frame_count = 0U;
-  uint32_t last_frame_tick = 0U;
   uint32_t stable_lock_frames = 0U;
   uint8_t laser_enabled = 0U;
   uint8_t aim_locked = 0U;
@@ -264,7 +360,6 @@ int main(void)
 
   K230_ResetParser();
   Uart_StartReceiveIT();
-  last_frame_tick = HAL_GetTick();
 
   while (1)
   {
@@ -296,10 +391,19 @@ int main(void)
       }
     }
 
+    /* Circle mode: K230 sends DRAW_READY (0xE1) to trigger, then DRAW_POINT frames */
+    if (ctrl_mode == CTRL_MODE_CIRCLE)
+    {
+      peripheral_laser_off();   /* ensure laser off before entering */
+      laser_enabled = 0U;
+      Circle_FollowPoints();    /* follow K230 trajectory points (blocks until timeout) */
+      g_ctrl_mode = CTRL_MODE_TRACK;  /* return to tracking after circle */
+    }
+
+    /* Normal tracking logic */
     if ((ctrl_mode == CTRL_MODE_TRACK) && (latest_frame_count != handled_frame_count))
     {
       handled_frame_count = latest_frame_count;
-      last_frame_tick = HAL_GetTick();
 
       err_x = (int16_t)cmd_x - K230_CENTER_X;
       err_y = (int16_t)cmd_y - K230_CENTER_Y;
@@ -355,10 +459,6 @@ int main(void)
       /* Only send new command when motors are idle (non-blocking) */
       if ((motor_cmd_x != 0) || (motor_cmd_y != 0))
       {
-        /* Shrink critical section: only protect IsMoving() check to avoid
-         * race condition. MoveAxes() contains DWT_DelayUs(~1300us) which
-         * must NOT run with IRQs disabled, otherwise UART/UART2 RX data
-         * will be lost. */
         uint32_t primask_save = __get_PRIMASK();
         __disable_irq();
         uint8_t need_move = !DualStepper_IsMoving();
@@ -377,7 +477,7 @@ int main(void)
       stable_lock_frames = 0U;
     }
 
-    /* Laser control: direct deadband check, outside new-frame block */
+    /* Laser control: direct deadband check */
     if (g_boot_centered && ctrl_mode == CTRL_MODE_TRACK &&
         (ABS(err_x) <= LASER_DEADBAND_X) && (ABS(err_y) <= LASER_DEADBAND_Y))
     {

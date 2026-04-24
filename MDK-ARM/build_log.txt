@@ -1,0 +1,13 @@
+*** Using Compiler 'V5.06 update 5 (build 528)', folder: 'D:\Keil_v5\ARM\ARMCC\Bin'
+Build target 'CTRL'
+compiling main.c...
+../Core/Inc/peripheral_lib.h(95): warning:  #1-D: last line of file ends without a newline
+  #endif /* __PERIPHERAL_LIB_H */
+../Core/Src/main.c(346): warning:  #550-D: variable "aim_locked"  was set but never used
+    uint8_t aim_locked = 0U;
+../Core/Src/main.c: 2 warnings, 0 errors
+linking...
+Program Size: Code=8688 RO-data=312 RW-data=84 ZI-data=1820  
+FromELF: creating hex file...
+"CTRL\CTRL.axf" - 0 Error(s), 2 Warning(s).
+Build Time Elapsed:  00:00:02
