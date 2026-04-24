@@ -1,0 +1,54 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.axf
+
+# Keil MDK artifacts
+MDK-ARM/*.bak
+MDK-ARM/*.tmp
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+MDK-ARM/CTRL/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+
+# IDE and editor files
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Project specific ignores
+.claude/
+K230/
+
+# Large media files
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# System files
+*.sys
+*.dll
+*.exe
+
+# Dependency directories
+**/node_modules/
+**/__pycache__/
+*.pyc
