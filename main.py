@@ -1,4 +1,5 @@
 import gc
+import math
 import time
 
 import aicube
@@ -30,9 +31,6 @@ if USE_UART:
 UART_FUNC_POINT = 0xF2
 UART_FUNC_LOST  = 0xF3
 
-has_ever_locked = False
-lost_reported = False
-
 # ========================= 基本配置 =========================
 display_mode = "lcd"   # "lcd" or "hdmi"
 debug_mode = 0
@@ -53,17 +51,18 @@ config_path = root_path + "deploy_config.json"
 # ========================= lock 参数 =========================
 LOCK_IOU_TH = 0.40
 LOCK_SCORE_BONUS = 0.35
-LOST_MAX = 6
+LOST_MAX = 15
 GC_INTERVAL = 20
 CROSS_SIZE = 12
 
 # ========================= Kalman 参数 =========================
 KF_ENABLE = True
 KF_Q_POS = 0.50
-KF_Q_VEL = 0.20
-KF_R_BOX = 20
+KF_Q_VEL = 1.0      # 提高速度过程噪声，让速度更快适应变化
+KF_R_BOX = 10       # 降低测量噪声假设，增大卡尔曼增益
 KF_GATE_DIST2 = 200 * 200
-KF_VEL_DAMP = 0.80
+KF_VEL_DAMP = 0.95  # 减少速度衰减，保持记忆更久
+KF_LOST_PREDICT_MAX = 10
 
 # ========================= 固定中心参数 =========================
 CENTER_LOCK_ENABLE = True
@@ -83,11 +82,11 @@ LOCKED_AIM_BLEND_BAND = 15
 REFINE_ENABLE = False  # 开启后在 YOLO 框及其外扩区域内用阈值法精修白色矩形
 
 # Tracking constants used by pick_best_det
-TRACK_MATCH_MAX_DIST2 = 150 * 150
+TRACK_MATCH_MAX_DIST2 = 250 * 250
 TRACK_REACQUIRE_SCORE_TH = 0.85
 
 # ========================= 串口发送节流 =========================
-UART_SEND_INTERVAL_MS = 15
+UART_SEND_INTERVAL_MS = 8
 NO_TARGET_SEND_CENTER = False
 uart_last_send_ms = 0
 UART_DEBUG_PRINT = False  # 串口打印坐标偏移调试信息（开启会降低FPS）
@@ -337,7 +336,7 @@ def refine_box_edges(arr, x1, y1, x2, y2):
     g2 = arr[2, ey1:ey2, ex1:ex2]
     gray = (g0 + g1 + g2) // 3
 
-    # 固定高阈值：白色矩形区域灰度值应远高于暗色背景
+    # 固定高阈值：白色矩形区域灰度值远高于暗色背景
     # 不用 avg+20 自适应阈值，因为 YOLO 框可能完全在暗色区域上
     threshold = 180
 
@@ -466,6 +465,87 @@ class Kalman1D:
         return self.x
 
 
+class Kalman2D:
+    """2D Kalman filter with position, velocity, acceleration states.
+    Provides acceleration feedforward for fast target turns."""
+    def __init__(self, q_pos=0.5, q_vel=1.0, q_acc=0.5, r=10.0):
+        self.q_pos = q_pos
+        self.q_vel = q_vel
+        self.q_acc = q_acc
+        self.r = r
+        self.inited = False
+        self.x = 0.0   # position
+        self.v = 0.0   # velocity
+        self.a = 0.0   # acceleration
+        # Covariance matrix 3x3 stored as flat list [9]
+        self.p = [10.0] * 9
+
+    def reset(self, z):
+        self.inited = True
+        self.x = float(z)
+        self.v = 0.0
+        self.a = 0.0
+        self.p = [10.0, 0.0, 0.0,
+                   0.0, 50.0, 0.0,
+                   0.0,  0.0, 10.0]
+
+    def predict(self):
+        if not self.inited:
+            return
+        # State transition (dt=1): x += v + 0.5*a; v += a; a unchanged
+        self.x = self.x + self.v + 0.5 * self.a
+        self.v = self.v + self.a
+        # Covariance prediction: P = F*P*F' + Q
+        # F = [[1,1,0.5],[0,1,1],[0,0,1]]
+        p = self.p
+        n00 = p[0] + 2*p[1] + p[4] + p[2] + p[5] + 0.25*p[8] + self.q_pos
+        n01 = p[1] + p[4] + 0.5*p[7] + p[4] + p[7] + 0.5*p[8]
+        n02 = p[2] + p[5] + 0.5*p[8]
+        n11 = p[4] + 2*p[7] + p[8] + self.q_vel
+        n12 = p[5] + p[8]
+        n22 = p[8] + self.q_acc
+        self.p = [n00, n01, n02,
+                  n01, n11, n12,
+                  n02, n12, n22]
+
+    def update(self, z, r_override=None):
+        if not self.inited:
+            self.reset(z)
+            return
+        r = self.r if r_override is None else r_override
+        y = float(z) - self.x  # innovation
+        s = self.p[0] + r
+        if s <= 1e-6:
+            return
+        # Kalman gain K = P*H'/s, H=[1,0,0]
+        k0 = self.p[0] / s
+        k1 = self.p[3] / s
+        k2 = self.p[6] / s
+        # State update
+        self.x += k0 * y
+        self.v += k1 * y
+        self.a += k2 * y
+        # Covariance update: P = (I - K*H)*P  (only first column of K matters)
+        p0, p1, p2 = self.p[0], self.p[1], self.p[2]
+        p3, p4, p5 = self.p[3], self.p[4], self.p[5]
+        p6, p7, p8 = self.p[6], self.p[7], self.p[8]
+        self.p[0] = (1 - k0) * p0
+        self.p[1] = (1 - k0) * p1
+        self.p[2] = (1 - k0) * p2
+        self.p[3] = p3 - k1 * p0
+        self.p[4] = p4 - k1 * p1
+        self.p[5] = p5 - k1 * p2
+        self.p[6] = p6 - k2 * p0
+        self.p[7] = p7 - k2 * p1
+        self.p[8] = p8 - k2 * p2
+
+    def get(self):
+        return self.x
+
+    def get_vel(self):
+        return self.v
+
+
 
 # ========================= 主逻辑 =========================
 def detection():
@@ -557,8 +637,8 @@ def detection():
 
     gc_cnt = 0
 
-    kf_x = Kalman1D(KF_Q_POS, KF_Q_VEL, KF_R_BOX, KF_VEL_DAMP)
-    kf_y = Kalman1D(KF_Q_POS, KF_Q_VEL, KF_R_BOX, KF_VEL_DAMP)
+    kf_x = Kalman2D(KF_Q_POS, KF_Q_VEL, KF_Q_VEL * 0.5, KF_R_BOX)
+    kf_y = Kalman2D(KF_Q_POS, KF_Q_VEL, KF_Q_VEL * 0.5, KF_R_BOX)
 
     try:
         while True:
@@ -656,8 +736,12 @@ def detection():
                                 pred_y = kf_y.get()
                                 dxg = meas_cx - pred_x
                                 dyg = meas_cy - pred_y
+                                dist2 = dxg * dxg + dyg * dyg
 
-                                if (dxg * dxg + dyg * dyg) <= KF_GATE_DIST2 or score >= 0.90:
+                                # Wider gate for high-score detections
+                                gate = KF_GATE_DIST2 if score < 0.85 else KF_GATE_DIST2 * 2
+
+                                if dist2 <= gate or score >= 0.90:
                                     kf_x.update(meas_cx, KF_R_BOX)
                                     kf_y.update(meas_cy, KF_R_BOX)
                                 else:
@@ -795,14 +879,30 @@ def detection():
                         candidate_confirm_cnt = 0
                         aim_center_ai = None
 
-                        kf_x.inited = False
-                        kf_y.inited = False
+                        # Keep KF predicting during short target loss
+                        if lost_cnt <= KF_LOST_PREDICT_MAX:
+                            kf_x.predict()
+                            kf_y.predict()
+                            # Send KF predicted position to STM32 during loss
+                            pred_cx = clamp(int(round(kf_x.get())), 0, OUT_RGB888P_WIDTH - 1)
+                            pred_cy = clamp(int(round(kf_y.get())), 0, OUT_RGB888P_HEIGH - 1)
+                            uart_send_point(pred_cx, pred_cy)
+                        else:
+                            kf_x.inited = False
+                            kf_y.inited = False
 
-                        osd_img.draw_string_advanced(
-                            20, 50, 24,
-                            "NO TARGET",
-                            color=(255, 0, 0)
-                        )
+                        if lost_cnt <= KF_LOST_PREDICT_MAX:
+                            osd_img.draw_string_advanced(
+                                20, 50, 24,
+                                "TRACKING (KF)",
+                                color=(255, 200, 0)
+                            )
+                        else:
+                            osd_img.draw_string_advanced(
+                                20, 50, 24,
+                                "NO TARGET",
+                                color=(255, 0, 0)
+                            )
                         if has_ever_locked and (not lost_reported) and (lost_cnt >= LOST_MAX):
                             uart_send_lost()
                             lost_reported = True

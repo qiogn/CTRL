@@ -36,7 +36,8 @@ typedef enum
 #define K230_FRAME_HEIGHT 360U
 #define K230_CENTER_X ((int16_t)(K230_FRAME_WIDTH / 2U))
 #define K230_CENTER_Y ((int16_t)(K230_FRAME_HEIGHT / 2U))
-#define K230_FRAME_TIMEOUT_MS 120U
+#define K230_FRAME_TIMEOUT_MS 250U  /* Soft timeout (unused, reserved) */
+#define K230_FRAME_LOST_TIMEOUT_MS 800U  /* Hard timeout before switching to IDLE */
 
 #define K230_FRAME_HEAD1 0xAAU
 #define K230_FRAME_HEAD2 0xFFU
@@ -58,6 +59,10 @@ typedef enum
 #define LASER_DEADBAND_Y  50
 
 #define ABS(x) ((x) < 0 ? -(x) : (x))
+
+/* EMA filter: alpha in Q15 format. 0.35 * 32768 ≈ 11469 */
+#define EMA_ALPHA_Q15 11469
+#define EMA_ALPHA_SHIFT 15
 
 #define MOTOR_CMD_LIMIT_X 12
 #define MOTOR_CMD_LIMIT_Y 12
@@ -97,6 +102,9 @@ static volatile CtrlMode_t g_ctrl_mode = CTRL_MODE_IDLE;
 static volatile uint32_t g_last_msg_tick = 0U;
 static volatile uint8_t g_boot_centered = 0U;
 static volatile uint32_t g_led_blink_start = 0U;
+static int32_t g_err_x_smoothed = 0;  /* Q15 fixed-point */
+static int32_t g_err_y_smoothed = 0;  /* Q15 fixed-point */
+static uint8_t  g_err_inited = 0U;
 /* USER CODE END PV */
 
 void SystemClock_Config(void);
@@ -244,10 +252,8 @@ int main(void)
   uint16_t pulse_width_us = AIM_PULSE_WIDTH_US;
   uint32_t handled_frame_count = 0U;
   uint32_t latest_frame_count = 0U;
-  uint32_t last_frame_tick = 0U;
   uint32_t stable_lock_frames = 0U;
   uint8_t laser_enabled = 0U;
-  uint8_t aim_locked = 0U;
   CtrlMode_t ctrl_mode = CTRL_MODE_IDLE;
 
   HAL_Init();
@@ -264,7 +270,6 @@ int main(void)
 
   K230_ResetParser();
   Uart_StartReceiveIT();
-  last_frame_tick = HAL_GetTick();
 
   while (1)
   {
@@ -277,12 +282,13 @@ int main(void)
     ctrl_mode = g_ctrl_mode;
     __set_PRIMASK(primask);
 
-    /* Check for message timeout */
+    /* Check for message timeout — hard timeout before switching to IDLE */
     if ((ctrl_mode == CTRL_MODE_TRACK) &&
-        ((HAL_GetTick() - g_last_msg_tick) >= K230_FRAME_TIMEOUT_MS))
+        ((HAL_GetTick() - g_last_msg_tick) >= K230_FRAME_LOST_TIMEOUT_MS))
     {
       ctrl_mode = CTRL_MODE_IDLE;
       g_ctrl_mode = CTRL_MODE_IDLE;
+      g_err_inited = 0U;  /* Reset EMA on full timeout */
     }
 
     /* LED blink debug indicator for UART frame reception */
@@ -296,10 +302,10 @@ int main(void)
       }
     }
 
+    /* Normal tracking logic */
     if ((ctrl_mode == CTRL_MODE_TRACK) && (latest_frame_count != handled_frame_count))
     {
       handled_frame_count = latest_frame_count;
-      last_frame_tick = HAL_GetTick();
 
       err_x = (int16_t)cmd_x - K230_CENTER_X;
       err_y = (int16_t)cmd_y - K230_CENTER_Y;
@@ -309,16 +315,34 @@ int main(void)
       if (err_y > INPUT_LIMIT_Y) err_y = INPUT_LIMIT_Y;
       if (err_y < -INPUT_LIMIT_Y) err_y = -INPUT_LIMIT_Y;
 
+      /* --- EMA smoothing on error (Q15 fixed-point) --- */
+      if (!g_err_inited)
+      {
+        g_err_x_smoothed = (int32_t)err_x << EMA_ALPHA_SHIFT;
+        g_err_y_smoothed = (int32_t)err_y << EMA_ALPHA_SHIFT;
+        g_err_inited = 1U;
+      }
+      else
+      {
+        g_err_x_smoothed = (int32_t)EMA_ALPHA_Q15 * err_x +
+                           ((1 << EMA_ALPHA_SHIFT) - EMA_ALPHA_Q15) * g_err_x_smoothed;
+        g_err_x_smoothed >>= EMA_ALPHA_SHIFT;
+
+        g_err_y_smoothed = (int32_t)EMA_ALPHA_Q15 * err_y +
+                           ((1 << EMA_ALPHA_SHIFT) - EMA_ALPHA_Q15) * g_err_y_smoothed;
+        g_err_y_smoothed >>= EMA_ALPHA_SHIFT;
+      }
+
+      /* Use smoothed error for all downstream logic */
+      err_x = (int16_t)(g_err_x_smoothed >> EMA_ALPHA_SHIFT);
+      err_y = (int16_t)(g_err_y_smoothed >> EMA_ALPHA_SHIFT);
+
       /* Lock detection */
       if ((ABS(err_x) <= AIM_LOCK_DEADBAND_X) && (ABS(err_y) <= AIM_LOCK_DEADBAND_Y))
       {
         if (stable_lock_frames < AIM_LOCK_STABLE_FRAMES) stable_lock_frames += 1U;
       }
       else stable_lock_frames = 0U;
-
-      if (stable_lock_frames >= AIM_LOCK_STABLE_FRAMES) aim_locked = 1U;
-      else if ((ABS(err_x) >= AIM_RELEASE_DEADBAND_X) || (ABS(err_y) >= AIM_RELEASE_DEADBAND_Y))
-        aim_locked = 0U;
 
       /* Motion deadband */
       if (ABS(err_x) <= AIM_MOTION_DEADBAND_X) err_x = 0;
@@ -355,10 +379,6 @@ int main(void)
       /* Only send new command when motors are idle (non-blocking) */
       if ((motor_cmd_x != 0) || (motor_cmd_y != 0))
       {
-        /* Shrink critical section: only protect IsMoving() check to avoid
-         * race condition. MoveAxes() contains DWT_DelayUs(~1300us) which
-         * must NOT run with IRQs disabled, otherwise UART/UART2 RX data
-         * will be lost. */
         uint32_t primask_save = __get_PRIMASK();
         __disable_irq();
         uint8_t need_move = !DualStepper_IsMoving();
@@ -373,11 +393,10 @@ int main(void)
     }
     else
     {
-      aim_locked = 0U;
       stable_lock_frames = 0U;
     }
 
-    /* Laser control: direct deadband check, outside new-frame block */
+    /* Laser control: direct deadband check */
     if (g_boot_centered && ctrl_mode == CTRL_MODE_TRACK &&
         (ABS(err_x) <= LASER_DEADBAND_X) && (ABS(err_y) <= LASER_DEADBAND_Y))
     {
